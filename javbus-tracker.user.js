@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
+// @version      1.0.1
 // @description  自动检索JavBus页面影视列表，显示浏览状态、收藏状态和评分，点击时上报查看记录
 // @author       You
 // @match        https://www.javbus.com/*
@@ -563,15 +563,6 @@
         for (const [code, element] of movieItems) {
             if (!processedCodes.has(code) && !pendingCodes.includes(code)) {
                 pendingCodes.push(code);
-
-                // 添加点击事件监听
-                const link = element.querySelector('a[href]') || element;
-                if (!link.dataset.jtTracked) {
-                    link.dataset.jtTracked = 'true';
-                    link.addEventListener('click', () => {
-                        trackView(code);
-                    });
-                }
             }
         }
 
