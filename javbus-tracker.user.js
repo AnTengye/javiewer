@@ -524,6 +524,8 @@
             const element = movieItems.get(code);
             if (element) {
                 renderItemBadges(element, status);
+                // 仅在成功渲染后标记处理，避免DOM临时缺失导致后续不再补渲染
+                processedCodes.add(code);
             }
         }
 
@@ -544,13 +546,12 @@
                     const element = movieItems.get(code);
                     if (element) {
                         renderItemBadges(element, item);
+                        // 仅在成功渲染后标记处理，避免DOM变更后遗漏
+                        processedCodes.add(code);
                     }
                 }
             }
         }
-
-        // 标记为已处理
-        currentBatch.forEach(code => processedCodes.add(code));
 
     }, CONFIG.DEBOUNCE_DELAY);
 
@@ -561,6 +562,10 @@
         const movieItems = getMovieItems();
 
         for (const [code, element] of movieItems) {
+            // DOM可能被瀑布流/懒加载替换：若已处理但当前节点无徽章，允许重新渲染
+            if (processedCodes.has(code) && !element.querySelector('.jt-badge-container')) {
+                processedCodes.delete(code);
+            }
             if (!processedCodes.has(code) && !pendingCodes.includes(code)) {
                 pendingCodes.push(code);
             }
