@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      1.0.1
+// @version      1.0.2
 // @description  自动检索JavBus页面影视列表，显示浏览状态、收藏状态和评分，点击时上报查看记录
 // @author       You
 // @match        https://www.javbus.com/*
