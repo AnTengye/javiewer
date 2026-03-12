@@ -1,18 +1,28 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      1.0.2
-// @description  自动检索JavBus页面影视列表，显示浏览状态、收藏状态和评分，点击时上报查看记录
-// @author       You
-// @match        https://www.javbus.com/*
-// @match        https://javbus.com/*
+// @version      2.0.0
+// @description  自动检索JavBus页面影视列表显示浏览状态，并集成原 JAV老司机 的瀑布流、排版优化及多站评分。
+// @author       Antengye
+// @match        *://*javbus.com/*
+// @match        *://www.*bus*/*
+// @match        *://www.*javsee*/*
+// @match        *://www.*seejav*/*
+// @match        *://*javdb*.com/*
+// @require      https://cdn.jsdelivr.net/npm/jquery@2.2.4/dist/jquery.min.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_addStyle
+// @grant        GM_setClipboard
+// @grant        GM_registerMenuCommand
 // @connect      qqq.bigorange.work
-// @run-at       document-end
+// @connect      *
+// @run-at       document-idle
 // ==/UserScript==
 
+
+// ==================== 影视追踪助手 ====================
 (function () {
     'use strict';
 
@@ -687,4 +697,726 @@
         init();
     }
 
+})();
+
+// ==================== JAV老司机 (排版增强/瀑布流) ====================
+/* jshint -W097 */
+(function () {
+    'use strict';
+    const JAVDB_ITEM_SELECTOR = '.movie-list.v.cols-4.vcols-8 .item, .movie-list.v.cols-4.vcols-5 .item, .movie-list.h.cols-4.vcols-8 .item, .movie-list.h.cols-4.vcols-5 .item';
+    const JAVDB_DOMAIN = 'javdb368.com';
+    const MMTV_DOMAIN = '7mmtv.sx';
+
+    // 瀑布流状态：1：开启、0：关闭
+    let waterfallScrollStatus = GM_getValue('scroll_status', 1);
+
+    /**
+     * 多线程异步队列 依赖 jQuery 1.8+
+     */
+    function Queue(n) {
+        n = parseInt(n, 10);
+        return new Queue.prototype.init((n && n > 0) ? n : 1)
+    }
+
+    Queue.prototype = {
+        init: function (n) {
+            this.threads = [];
+            this.taskList = [];
+            while (n--) {
+                this.threads.push(new this.Thread)
+            }
+        },
+        push: function (callback) {
+            if (typeof callback !== 'function') return;
+            var index = this.indexOfIdle();
+            if (index != -1) {
+                this.threads[index].idle(callback);
+            } else {
+                this.taskList.push(callback);
+                for (var i = 0, l = this.threads.length; i < l; i++) {
+                    ((thread, self, id) => {
+                        thread.idle(() => {
+                            if (self.taskList.length > 0) {
+                                let promise = self.taskList.shift()(); 
+                                return promise.promise ? promise : $.Deferred().resolve().promise();
+                            } else {
+                                return $.Deferred().resolve().promise();
+                            }
+                        })
+                    })(this.threads[i], this, i);
+
+                }
+            }
+        },
+        indexOfIdle: function () {
+            var threads = this.threads,
+                thread = null,
+                index = -1;
+            for (var i = 0, l = threads.length; i < l; i++) {
+                thread = threads[i];
+                if (thread.promise.state() === 'resolved') {
+                    index = i;
+                    break;
+                }
+            }
+            return index;
+        },
+        Thread: function () {
+            this.promise = $.Deferred().resolve().promise();
+            this.idle = (callback) => {
+                this.promise = this.promise.then(callback)
+            }
+        }
+    };
+    Queue.prototype.init.prototype = Queue.prototype;
+
+    class Common {
+        static init() {
+            if (GM_getValue('javdb_url', undefined) === undefined) {
+                GM_setValue('javdb_url', JAVDB_DOMAIN);
+            }
+            if (GM_getValue('javlib_url', undefined) === undefined) {
+                GM_setValue('javlib_url', 'www.javlibrary.com');
+            }
+            if (GM_getValue('javbus_url', undefined) === undefined) {
+                GM_setValue('javbus_url', 'www.javbus.com');
+            }
+
+            GM_registerMenuCommand('设置瀑布流状态', () => { 
+                let current = GM_getValue('scroll_status', 1);
+                let next = current === 1 ? 0 : 1;
+                if(confirm("当前瀑布流状态：" + (current===1?"开启":"关闭") + "\n是否切换为：" + (next===1?"开启":"关闭") + " ?")) {
+                    GM_setValue('scroll_status', next);
+                    location.reload();
+                }
+            });
+        }
+
+        static parsetext(text) {
+            try {
+                let doc = document.implementation.createHTMLDocument('');
+                doc.documentElement.innerHTML = text;
+                return doc;
+            } catch (e) {
+                console.log('parse error');
+            }
+        }
+
+        static requestGM_XHR(details) {
+            return new Promise((resolve, reject) => {
+                let req = GM_xmlhttpRequest({
+                    method: details.method ? details.method : "GET",
+                    url: details.url,
+                    headers: details.headers,
+                    timeout: details.timeout > 0 ? details.timeout : 20000,
+                    onload: rsp => resolve(rsp),
+                    onerror: rsp => {
+                        reject(`error`);
+                    },
+                    ontimeout: rsp => {
+                        reject(`timeout`);
+                    }
+                });
+            });
+        }
+
+        static getAvCode(avid) {
+            if (avid.match(/-[^0]/g)) return avid;
+            if (avid.match(/^[0-9-_]+$/g)) return avid;
+            if (avid.match(/^(crazyasia|sm|video_|BrazzersExxtra)+/gi)) return avid;
+            avid = avid.replace(/\b(FC2+)/gi, "");
+            let letter = avid.match(/[a-z|A-Z]+/gi);
+            let num = avid.match(/\d+$/gi)[0];
+            if (num.length > 3) {
+                num = num.replace(/\b(0+)/gi, ""); 
+                if (num.length < 3) {
+                    num = (Array(3).join(0) + num).slice(-3);
+                }
+            }
+            return letter.toString().replace(/,/g, "-") + "-" + num;
+        }
+
+        static getDmmId(url) {
+            let array = url.split("/");
+            let dmmId = array[array.length - 2];
+            let num = dmmId.match(/\d+$/gi);
+            let prefix = dmmId.replace(num, "");
+
+            if (num) {
+                if (!num[0].match(/^00/) && num[0].length < 5) {
+                    num = '00' + num;
+                }
+                return prefix + num;
+            } else {
+                return null;
+            }
+        }
+
+        static getOneJavSearchUrl(avid) {
+            avid = avid.replace(/-|FC2|PPV/g, "");
+            return "https://onejav.com/search/" + avid;
+        }
+
+        static getDmmData(dmmIdUrl) {
+            if (!dmmIdUrl) return Promise.resolve(null);
+            return Common.requestGM_XHR({
+                url: dmmIdUrl,
+                timeout: 15000,
+                headers: {
+                    "Accept-Language": "ja-JP", 
+                    "cookie": "age_check_done=1;" 
+                },
+            }).then((result) => {
+                var doc = Common.parsetext(result.responseText);
+                let dmmData = {};
+                dmmData.collect_num = $(doc).find(".tx-count span").text();
+                dmmData.score = $(doc).find(".d-review__average strong").text();
+                dmmData.user_num = $(doc).find(".d-review__evaluates strong").text();
+                dmmData.url = dmmIdUrl;
+                return dmmData;
+            }).catch(msg => {
+                return {};
+            });
+        }
+
+        static getJavDbData(avid) {
+            return new Promise((resolve, reject) => {
+                Common.requestGM_XHR({url: "https://" + GM_getValue('javdb_url') + "/search?f=all&q=" + avid}).then((result) => {
+                    let doc = Common.parsetext(result.responseText);
+                    let a = $(doc).find(`.box .video-title:contains('${avid.toUpperCase()}')`);
+                    if (a.length) {
+                        let javdbData = {};
+                        javdbData.score = $(a[0].parentElement).find('.score>span').text();
+                        if (a[0].parentElement.href.indexOf("http") >= 0) {
+                            javdbData.url = a[0].parentElement.href.replace(location.origin, 'https://' + [GM_getValue('javdb_url')]);
+                        } else {
+                            javdbData.url = 'https://' + [GM_getValue('javdb_url')] + a[0].parentElement.href;
+                        }
+                        resolve(javdbData);
+                    } else {
+                        reject("javdb没查找到此番号");
+                    }
+                });
+            });
+        }
+    };
+
+    class Jav {
+        static getAvidAndChgPage() {
+            let AVID = $('.header')[0].nextElementSibling.textContent;
+            $('.header')[0].nextElementSibling.id = "avid";
+            $('#avid').empty().attr("title", "点击复制番号").attr("avid", AVID);
+            let a_avid = document.createElement('a');
+            $(a_avid).attr("href", "#").append(AVID);
+            $(a_avid).click((e) => {
+                e.preventDefault();
+                GM_setClipboard($('#avid').attr("avid"));
+                alert("已复制：" + AVID);
+            });
+            $('#avid').append(a_avid);
+            $('#avid').after("<span style='color:red;'>(←点击复制)</span>");
+            $($('.header')[0]).attr("class", "header_hobby");
+            return AVID;
+        }
+
+        static waterfallButton() {
+            let a3 = document.createElement('a');
+            (waterfallScrollStatus > 0) ? $(a3).append('关闭瀑布流&nbsp;&nbsp;') : $(a3).append('开启瀑布流&nbsp;&nbsp;');
+            $(a3).css({
+                "color": "blue",
+                "font": "bold 12px monospace"
+            });
+            $(a3).attr("href", "#");
+            $(a3).click(function (e) {
+                e.preventDefault();
+                if ((/关闭/g).test($(this).html())) {
+                    GM_setValue('scroll_status', 0);
+                } else {
+                    GM_setValue('scroll_status', 1);
+                }
+                window.location.reload();
+            });
+            return a3;
+        }
+
+        static javBusScript() {
+            let a3 = this.waterfallButton();
+            if ((/(JavBus|AVMOO|AVSOX)/g).test(document.title) || $("footer:contains('JavBus')").length) {
+                GM_addStyle(`
+                    .info p {line-height: 18px!important;}
+                    .screencap img{	width:100%;	max-width: 1000px;}
+                `);
+                
+                $('#navbar ul.nav.navbar-nav li:eq(0)').after(`<li><a href="https://onejav.com/popular/?amateur=1" target="_blank" style="color: red;">FC2</a></li>`);
+                $('#navbar ul.nav.navbar-nav li:eq(0)').after('<li><a href="/search/VR&type=1" style="color: red;">VR</a></li>');
+                
+                let li_elem = document.createElement('li');
+                $(li_elem).append($(a3));
+                $(".visible-md-block").closest(".dropdown").after($(li_elem));
+                $(".active").closest(".navbar-nav").append($(li_elem));
+                $(".ad-box").remove();
+
+                thirdparty.waterfallScrollInit();
+
+                if ($('.header').length && $('meta[name="keywords"]').length) {
+                    let AVID = this.getAvidAndChgPage();
+
+                    $('p.header').before('<p id="zuobiao"></p>');
+                    let $p_zuobiao = $('#zuobiao');
+
+                    let a_imgs = $('#sample-waterfall>a');
+                    if (a_imgs.length && !$('a.avatar-box[href*="uncensored"]').length && !location.hostname.includes('javbus.org')
+                        && $('#sample-waterfall>a[href*="pics.dmm"]').length) {
+                        Common.getDmmData(`https://www.dmm.co.jp/digital/videoa/-/detail/=/cid=${Common.getDmmId(a_imgs[0].href)}/`).then((dmmData) => {
+                            if(dmmData.score) {
+                                $p_zuobiao.before(`
+                                    <p>
+                                        <span class="header">
+                                            <a target="_blank" href="${dmmData.url}" style="color: blue;">DMM&nbsp;评:</a>
+                                        </span>
+                                        ${dmmData.score.replace("点", "分")}, ${dmmData.user_num}人评, ${dmmData.collect_num}收藏
+                                    </p>
+                                `);
+                            }
+                        });
+                    }
+
+                    Common.getJavDbData(AVID).then((javdbData) => {
+                        let score = javdbData.score.trim().replace("由", "").replace("人評價", "人评");
+                        $p_zuobiao.after(`
+                            <p>
+                                <span class="header"><a target="_blank" href="${javdbData.url}" style="color: blue;">javdb评:</a></span>
+                                ${score}
+                            </p>
+                        `);
+                    }).catch(()=>{});
+
+                    $('.col-md-3.info').append(`
+                        <p>
+                            <span class="header">在线预览:</span>
+                            <a href="https://missav.com/cn/${AVID}" target="_blank" style="color: rgb(204, 0, 0);" title="需解封印">missav&nbsp;</a>
+                            <a href="https://${MMTV_DOMAIN}/zh/censored_search/all/${AVID}/1.html" target="_blank" style="color: rgb(204, 0, 0);" title="需解封印">7mmtv&nbsp;</a>
+                            <a href="https://supjav.com/zh/?s=${AVID}" target="_blank" style="color: rgb(204, 0, 0);" title="需解封印">supjav&nbsp;</a>
+                        </p>
+                    `);
+                    $('.col-md-3.info').append(`
+                        <p id="linkJump">
+                            <span class="header">JAV跳转:</span>
+                            <a href="https://${GM_getValue('javlib_url')}/cn/vl_searchbyid.php?keyword=${AVID}" target="_blank" style="color: rgb(204, 0, 0);">JavLib&nbsp;</a>
+                        </p>
+                    `);
+
+                    // 简单增强磁力表格复制功能
+                    $('#magnet-table tbody tr').append('<td style="text-align:center;white-space:nowrap">操作</td>');
+                    
+                    const enhanceMagnetTable = () => {
+                        let tr_array = $('#magnet-table tr[height="35px"]');
+                        for (var i = 0; i < tr_array.length; i++) {
+                            let trEle = tr_array[i];
+                            if($(trEle).find('.nong-copy').length > 0) continue; // 已处理过
+                            let magnetUrl = $(trEle).find("td a")[0].href;
+                            $(trEle).append("<td style='text-align:center;'><div><a class='nong-copy' href='" + magnetUrl + "'>复制</a></div></td>");
+                            $(trEle).find(".nong-copy").click(function(e){
+                                e.preventDefault();
+                                GM_setClipboard($(this).attr('href'));
+                                $(this).text("成功");
+                                setTimeout(()=>$(this).text("复制"), 1000);
+                            });
+                        }
+                    };
+                    
+                    enhanceMagnetTable();
+                    const observer = new MutationObserver((mutationsList, observer) => {
+                        observer.disconnect(); 
+                        enhanceMagnetTable();
+                    });
+                    const targetNode = document.getElementById('magnet-table');
+                    if(targetNode) observer.observe(targetNode, { childList: true });
+                }
+            }
+        }
+
+        static javDBScript() {
+            if ((/(JavDB)/g).test(document.title)) {
+                if ($('.app-desktop-banner').length) $('.app-desktop-banner').remove();
+                if ($('.modal.is-active.over18-modal').length) $('.modal.is-active.over18-modal').remove();
+
+                $('.navbar-dropdown.is-boxed .navbar-item:contains("FC2")')
+                    .attr("href", "/advanced_search?type=3&score_min=4.2&score_max=&released_start=&released_end=&actors%5B%5D=&tags%5B%5D=&p=0&d=0&d=1&c=0&s=0&i=0&v=0&commit=檢索&lm=h").attr("style", "color: red;");
+                $('.navbar-dropdown.is-boxed .navbar-item:eq(0)')
+                    .after('<a class="navbar-item" href="/advanced_search?type=0&score_min=4.2&score_max=&released_start=&released_end=&actors%5B%5D=&tags%5B%5D=&tags%5B%5D=212%7CVR&p=0&d=0&d=1&c=0&s=0&i=0&v=0&commit=檢索&lm=h" style="color: red;">VR</a>');
+
+                thirdparty.waterfallScrollInit();
+
+                if (!$("#waterfall").hasClass("v cols-4 vcols-8")) {
+                    if (!$(".tabs.is-boxed").length) {
+                        $("#waterfall").before(`<div class="tabs is-boxed" style="justify-content: flex-end;"></div>`);
+                    }
+                    $(".tabs.is-boxed").before(`<a name="maodian" style="position: relative;top: -60px;"></a>`);
+                    $('.tabs.is-boxed').append(`
+                        <div style="display: flex;">
+                            <div class="is-active" style="border: 1px solid #3273dc;">
+                                <a id="javtopusernum" href="#maodian" style="background-color: white;color: #3273dc;font-weight: bold;">
+                                    <span>评分人数排序</span>
+                                </a>
+                            </div>
+                            <div class="is-active" style="border: 1px solid #3273dc;">
+                                <a id="javtopscore" href="#maodian" style="background-color: white;color: #3273dc;font-weight: bold;">
+                                    <span>JAV评分排序</span>
+                                </a>
+                            </div>
+                            <div style="border: 1px solid #3273dc;background-color: #f5f5f5;height: 2.8em;display: flex;">
+                                <a href="#maodian" style="color: #3273dc; font-weight: bold;">
+                                    <span>屏蔽评分人数&nbsp&lt;&nbsp</span>
+                                </a>
+                                <input id="offusernum" name="offusernum" class="input" placeholder="0&nbsp人数" min="0" max="9999" type="number"
+                                        style="height: 1.5em;width: 5.5em;padding: 2px;margin: 0.6em 1em 0 0;">
+                            </div>
+                        </div>
+                    `);
+
+                    $('#javtopscore').click((e) => {
+                        e.preventDefault();
+                        let div_array = $(JAVDB_ITEM_SELECTOR);
+                        div_array.sort((a, b) => {
+                            let a_score = parseFloat($(a).attr("score")) || 0;
+                            let b_score = parseFloat($(b).attr("score")) || 0;
+                            return b_score - a_score;
+                        });
+                        div_array.detach().appendTo("#waterfall");
+                        $('#javtopscore').css("background-color", "#3273dc").css("color", "white");
+                        $('#javtopusernum').css("background-color", "white").css("color", "#3273dc");
+                    });
+
+                    $('#javtopusernum').click((e) => {
+                        e.preventDefault();
+                        let div_array = $(JAVDB_ITEM_SELECTOR);
+                        div_array.sort((a, b) => {
+                            let a_score = parseFloat($(a).attr("usernum")) || 0;
+                            let b_score = parseFloat($(b).attr("usernum")) || 0;
+                            return b_score - a_score;
+                        });
+                        div_array.detach().appendTo("#waterfall");
+                        $('#javtopusernum').css("background-color", "#3273dc").css("color", "white");
+                        $('#javtopscore').css("background-color", "white").css("color", "#3273dc");
+                    });
+
+                    $('#offusernum').change(() => {
+                        let offusernum = $('#offusernum').val();
+                        if (offusernum) {
+                            $(JAVDB_ITEM_SELECTOR).toArray().forEach(e => {
+                                parseInt($(e).attr("usernum") || 0) < parseInt(offusernum) ? $(e).hide() : $(e).show();
+                            });
+                        }
+                    });
+
+                    if ($("div.video-detail").length > 0) {
+                        $("div.top-meta").remove();
+                    }
+                }
+            }
+        }
+    }
+
+    var thirdparty = {
+        waterfallScrollInit: () => {
+            var w = new thirdparty.waterfall({});
+            var $pages = $('div#waterfall div.item');
+            if ($pages.length) {
+                $pages[0].parentElement.parentElement.id = "waterfall_h";
+                if ($("footer:contains('JavBus')").length) {
+                    w = new thirdparty.waterfall({
+                        next: 'a#next',
+                        item: 'div#waterfall div.item',
+                        cont: '.masonry',
+                        pagi: '.pagination-lg',
+                    });
+                }
+                if ((/(AVMOO|AVSOX)/g).test(document.title)) {
+                    w = new thirdparty.waterfall({
+                        next: 'a[name="nextpage"]',
+                        item: 'div#waterfall div.item',
+                        cont: '#waterfall',
+                        pagi: '.pagination',
+                    });
+                }
+            }
+
+            var $pages4 = $(JAVDB_ITEM_SELECTOR);
+            if ($pages4.length) {
+                GM_addStyle(`
+                            .container {max-width: inherit !important;}
+                            .tags{display: block !important;}
+                            .tag.hobby{display: block;float: right;color: #fff;line-height: 2em;}
+                        `);
+                $pages4[0].parentElement.id = "waterfall";
+                w = new thirdparty.waterfall({
+                    next: '.pagination .pagination-next',
+                    item: JAVDB_ITEM_SELECTOR,
+                    cont: '#waterfall',
+                    pagi: '.pagination',
+                });
+            }
+
+            w.setSecondCallback((cont, elems) => {
+                if (location.pathname.includes('/star/') && elems) {
+                    cont.append(elems.slice(1));
+                } else {
+                    cont.append(elems);
+                }
+            });
+
+            w.setFourthCallback((elems) => {
+                if (((/(JavBus|AVMOO|AVSOX)/g).test(document.title) || $("footer:contains('JavBus')").length) && elems) {
+                    if (location.pathname.search('/searchstar|/actresses|/&mdl=favor&sort=4') < 0) {
+                        for (let i = 0; i < elems.length; i++) {
+                            if ($(elems[i]).find("div.avatar-box").length > 0) continue;
+                            let spanEle = $(elems[i]).find("div.photo-info span")[0];
+                            if(spanEle && $(spanEle).html().indexOf("<br>") > -1){
+                                let t1 = $(spanEle).html().substr($(spanEle).html().indexOf("<br>") + 4);
+                                let t2 = $(spanEle).html().substr(0, $(spanEle).html().indexOf("<br>"));
+                                $(spanEle).html(t1 + "<br>" + t2);
+                            }
+                        }
+                    }
+                }
+
+                if ((/(JavDB)/g).test(document.title) && elems) {
+                    elems.toArray().forEach(e => {
+                        $(e).find(".tags.has-addons span:not(.tag.is-success,.tag.is-warning)").remove();
+                        if ($(e).find(".tag.is-warning").length) {
+                            $(e).find(".tag.is-warning").text("含中字");
+                        }
+                        let $div = $(e).find(".tags.has-addons").eq(0);
+                        let avid = $(e).find(".video-title strong").text();
+
+                        if (!$div.children().length) {
+                            $div.append(`<span class="tag is-success" style="background-color:#fff;">.</span>`);
+                        }
+                        if (!$("#waterfall").hasClass("v cols-4 vcols-8")) {
+                            $div.append(`
+                                        <a title="无码 JAV资源站" href="https://${GM_getValue('javbus_url')}/${avid}" target="_blank">
+                                            <span class="tag hobby" style="margin-right: 5px;background-color:#febe00;">JavBus</span>
+                                        </a>
+                                        <a title="有码 JAV资源站" href="https://${GM_getValue('javlib_url')}/cn/vl_searchbyid.php?keyword=${avid}" target="_blank">
+                                            <span class="tag hobby" style="margin-right: 0px;background-color:#f908bb;">JavLib</span>
+                                        </a>
+                                        <a title="FC2 JAV资源站" href="${Common.getOneJavSearchUrl(avid)}" target="_blank">
+                                            <span class="tag hobby" style="margin-right: 3px;background-color:#00d1b2;">OneJav</span>
+                                        </a>
+                                    `);
+                            
+                            let scoresText = $(e).find('.score>span').text();
+                            let scoreMatches = scoresText.match(/-?(?:\d+(?:\.\d*)?|\.\d+)/g);
+                            if(scoreMatches && scoreMatches.length >= 2) {
+                                $(e).attr("score", scoreMatches[0]);
+                                $(e).attr("usernum", scoreMatches[1]);
+                            }
+                        }
+                    });
+                }
+            });
+
+            if ((/(JavBus|AVMOO|AVSOX)/g).test(document.title) || $("footer:contains('JavBus')").length) {
+                GM_addStyle(`
+                    #waterfall_h {height: initial !important;width: initial !important;flex-direction: row;flex-wrap: wrap;margin: 5px 15px !important;}
+                    #waterfall_h .item {position: relative !important;top: initial !important;left: initial !important;float: left;}
+                    #waterfall_h .movie-box img {position: absolute; top: -200px; bottom: -200px; left: -200px; right: -200px; margin: auto;}
+                    #waterfall_h .movie-box .photo-frame {position: relative;} #waterfall_h .avatar-box .photo-info p {margin: 0 0 2px;}
+                    #waterfall_h .avatar-box .photo-info {line-height: 15px; padding: 6px;height: 220px;}
+                    #waterfall_h .avatar-box .photo-frame {margin: 10px;text-align: center;}
+                    #waterfall_h .avatar-box.text-center {height: 195px;}
+                `);
+
+                if (location.pathname.includes('/uncensored') || location.hostname.includes('javbus.org') || (/(AVSOX)/g).test(document.title)) {
+                    GM_addStyle(`#waterfall_h .movie-box {width: 354px;} #waterfall_h .movie-box .photo-info {height: 105px;}`);
+                } else {
+                    GM_addStyle(`#waterfall_h .movie-box {width: 167px;} #waterfall_h .movie-box .photo-info {height: 145px;}`);
+                }
+            }
+        },
+        waterfall: (() => {
+            function waterfall(selectorcfg = {}) {
+                class Lock {
+                    constructor(d = false) {
+                        this.locked = d;
+                    }
+                    lock() {
+                        this.locked = true;
+                    }
+                    unlock() {
+                        this.locked = false;
+                    }
+                }
+                this.page_queue = new Queue(1);
+                this.lock = new Lock();
+                this.baseURI = this.getBaseURI();
+                this.selector = {
+                    next: 'a.next',
+                    item: '',
+                    cont: '#waterfall',
+                    pagi: '.pagination',
+                };
+                Object.assign(this.selector, selectorcfg);
+                this.pagegen = this.fetchSync(location.href);
+                this.anchor = $(this.selector.pagi)[0];
+                this._count = 0;
+                this._1func = (cont, elems) => {
+                    cont.empty().append(elems);
+                };
+                this._2func = (cont, elems) => {
+                    cont.append(elems);
+                };
+                this._4func = (elems) => { };
+                if ($(this.selector.item).length) {
+                    if (waterfallScrollStatus > 0) {
+                        document.addEventListener('scroll', this.scroll.bind(this));
+                        document.addEventListener('wheel', this.wheel.bind(this));
+                    }
+                    this.appendElems(this._1func);
+                }
+            }
+
+            waterfall.prototype.getBaseURI = () => {
+                let _ = location;
+                return `${_.protocol}//${_.hostname}${(_.port && `:${_.port}`)}`;
+            };
+            waterfall.prototype.getNextURL = function (href) {
+                let a = document.createElement('a');
+                a.href = href;
+                return `${this.baseURI}${a.pathname}${a.search}`;
+            };
+            waterfall.prototype.fetchURL = function (url) {
+                let status = 404;
+                const fetchwithcookie = fetch(url, { credentials: 'same-origin' });
+                return fetchwithcookie.then(response => {
+                    status = response.status;
+                    return response.text();
+                }).then(html => new DOMParser().parseFromString(html, 'text/html'))
+                    .then(doc => {
+                        let $doc = $(doc);
+                        let elems = [];
+                        let nextURL;
+                        if (status < 300) {
+                            let href = $doc.find(this.selector.next).attr('href');
+                            nextURL = href ? this.getNextURL(href) : undefined;
+                            elems = $doc.find(this.selector.item);
+                            for (const elem of elems) {
+                                const links = elem.getElementsByTagName('a');
+                                for (const link of links) {
+                                    link.target = "_blank";
+                                }
+                            }
+                            if ($(JAVDB_ITEM_SELECTOR).length && (this._count !== 0) && url === nextURL) {
+                                if ($(`#waterfall>div>a[href="${$(elems[0]).find('a.box')[0].attr('href')}"]`).length > 0) {
+                                    nextURL = undefined;
+                                    elems = [];
+                                }
+                            }
+                        } else {
+                            nextURL = undefined;
+                        }
+                        return {
+                            nextURL,
+                            elems
+                        };
+                    });
+            };
+            waterfall.prototype.fetchSync = function* (urli) {
+                let url = urli;
+                do {
+                    yield new Promise((resolve, reject) => {
+                        if (this.lock.locked) {
+                            reject();
+                        }
+                        else {
+                            this.lock.lock();
+                            resolve();
+                        }
+                    }).then(() => {
+                        return this.fetchURL(url).then(info => {
+                            url = info.nextURL;
+                            return info.elems;
+                        });
+                    }).then(elems => {
+                        this.lock.unlock();
+                        return elems;
+                    }).catch((err) => {
+                    });
+                } while (url);
+            };
+            waterfall.prototype.appendElems = function () {
+                let nextpage = this.pagegen.next();
+                if (!nextpage.done) {
+                    nextpage.value.then(elems => {
+                        const cb = (this._count === 0) ? this._1func : this._2func;
+                        cb($(this.selector.cont), elems);
+                        this._count += 1;
+                        this._4func(elems);
+                    });
+                }
+                return nextpage.done;
+            };
+            waterfall.prototype.end = function () {
+                document.removeEventListener('scroll', this.scroll.bind(this));
+                document.removeEventListener('wheel', this.wheel.bind(this));
+                let $end = $(`<h1>The End</h1>`);
+                $(this.anchor).replaceWith($end);
+            };
+            waterfall.prototype.reachBottom = function (elem, limit) {
+                if(!elem) return false;
+                return (elem.getBoundingClientRect().top - $(window).height()) < limit;
+            };
+            waterfall.prototype.scroll = function () {
+                this.pageQueuePush();
+            };
+            waterfall.prototype.wheel = function () {
+                this.pageQueuePush();
+            };
+            waterfall.prototype.pageQueuePush = function () {
+                this.page_queue.push(() => {
+                    let defer = $.Deferred();
+                    new Promise(resolve => {
+                        if (this.reachBottom(this.anchor, 1200) && this.appendElems(this._2func)) {
+                            this.end();
+                        }
+                        resolve();
+                    }).then(() => {
+                        setTimeout(() => {
+                             defer.resolve();
+                        }, 500);
+                    });
+                    return defer.promise();
+                });
+            };
+            waterfall.prototype.setFirstCallback = function (f) {
+                this._1func = f;
+            };
+            waterfall.prototype.setSecondCallback = function (f) {
+                this._2func = f;
+            };
+            waterfall.prototype.setFourthCallback = function (f) {
+                this._4func = f;
+            };
+            return waterfall;
+        })()
+    };
+
+    function mainRun() {
+        Common.init();
+
+        if ((/(JavBus|AVMOO|AVSOX)/g).test(document.title) || $("footer:contains('JavBus')").length) {
+            GM_addStyle(`
+                .container {width: 100%;float: left;}
+                .col-md-3 {float: left;max-width: 260px;}
+                .col-md-9 {width: inherit;}
+                .footer {padding: 20px 0;background: #1d1a18;float: left;}
+                .header_hobby {font-weight: bold;text-align: right;width: 75px;}
+            `);
+            Jav.javBusScript();
+        }
+        
+        Jav.javDBScript();
+    }
+    mainRun();
 })();
