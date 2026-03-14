@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
+// @version      2.1.0
 // @description  自动检索JavBus页面影视列表显示浏览状态，并集成原 JAV老司机 的瀑布流、排版优化及多站评分。
 // @author       Antengye
 // @match        *://*javbus.com/*
@@ -737,7 +737,7 @@
                     ((thread, self, id) => {
                         thread.idle(() => {
                             if (self.taskList.length > 0) {
-                                let promise = self.taskList.shift()(); 
+                                let promise = self.taskList.shift()();
                                 return promise.promise ? promise : $.Deferred().resolve().promise();
                             } else {
                                 return $.Deferred().resolve().promise();
@@ -782,10 +782,10 @@
                 GM_setValue('javbus_url', 'www.javbus.com');
             }
 
-            GM_registerMenuCommand('设置瀑布流状态', () => { 
+            GM_registerMenuCommand('设置瀑布流状态', () => {
                 let current = GM_getValue('scroll_status', 1);
                 let next = current === 1 ? 0 : 1;
-                if(confirm("当前瀑布流状态：" + (current===1?"开启":"关闭") + "\n是否切换为：" + (next===1?"开启":"关闭") + " ?")) {
+                if (confirm("当前瀑布流状态：" + (current === 1 ? "开启" : "关闭") + "\n是否切换为：" + (next === 1 ? "开启" : "关闭") + " ?")) {
                     GM_setValue('scroll_status', next);
                     location.reload();
                 }
@@ -828,7 +828,7 @@
             let letter = avid.match(/[a-z|A-Z]+/gi);
             let num = avid.match(/\d+$/gi)[0];
             if (num.length > 3) {
-                num = num.replace(/\b(0+)/gi, ""); 
+                num = num.replace(/\b(0+)/gi, "");
                 if (num.length < 3) {
                     num = (Array(3).join(0) + num).slice(-3);
                 }
@@ -863,8 +863,8 @@
                 url: dmmIdUrl,
                 timeout: 15000,
                 headers: {
-                    "Accept-Language": "ja-JP", 
-                    "cookie": "age_check_done=1;" 
+                    "Accept-Language": "ja-JP",
+                    "cookie": "age_check_done=1;"
                 },
             }).then((result) => {
                 var doc = Common.parsetext(result.responseText);
@@ -881,7 +881,7 @@
 
         static getJavDbData(avid) {
             return new Promise((resolve, reject) => {
-                Common.requestGM_XHR({url: "https://" + GM_getValue('javdb_url') + "/search?f=all&q=" + avid}).then((result) => {
+                Common.requestGM_XHR({ url: "https://" + GM_getValue('javdb_url') + "/search?f=all&q=" + avid }).then((result) => {
                     let doc = Common.parsetext(result.responseText);
                     let a = $(doc).find(`.box .video-title:contains('${avid.toUpperCase()}')`);
                     if (a.length) {
@@ -946,10 +946,10 @@
                     .info p {line-height: 18px!important;}
                     .screencap img{	width:100%;	max-width: 1000px;}
                 `);
-                
+
                 $('#navbar ul.nav.navbar-nav li:eq(0)').after(`<li><a href="https://onejav.com/popular/?amateur=1" target="_blank" style="color: red;">FC2</a></li>`);
                 $('#navbar ul.nav.navbar-nav li:eq(0)').after('<li><a href="/search/VR&type=1" style="color: red;">VR</a></li>');
-                
+
                 let li_elem = document.createElement('li');
                 $(li_elem).append($(a3));
                 $(".visible-md-block").closest(".dropdown").after($(li_elem));
@@ -968,7 +968,7 @@
                     if (a_imgs.length && !$('a.avatar-box[href*="uncensored"]').length && !location.hostname.includes('javbus.org')
                         && $('#sample-waterfall>a[href*="pics.dmm"]').length) {
                         Common.getDmmData(`https://www.dmm.co.jp/digital/videoa/-/detail/=/cid=${Common.getDmmId(a_imgs[0].href)}/`).then((dmmData) => {
-                            if(dmmData.score) {
+                            if (dmmData.score) {
                                 $p_zuobiao.before(`
                                     <p>
                                         <span class="header">
@@ -989,7 +989,7 @@
                                 ${score}
                             </p>
                         `);
-                    }).catch(()=>{});
+                    }).catch(() => { });
 
                     $('.col-md-3.info').append(`
                         <p>
@@ -1008,30 +1008,30 @@
 
                     // 简单增强磁力表格复制功能
                     $('#magnet-table tbody tr').append('<td style="text-align:center;white-space:nowrap">操作</td>');
-                    
+
                     const enhanceMagnetTable = () => {
                         let tr_array = $('#magnet-table tr[height="35px"]');
                         for (var i = 0; i < tr_array.length; i++) {
                             let trEle = tr_array[i];
-                            if($(trEle).find('.nong-copy').length > 0) continue; // 已处理过
+                            if ($(trEle).find('.nong-copy').length > 0) continue; // 已处理过
                             let magnetUrl = $(trEle).find("td a")[0].href;
                             $(trEle).append("<td style='text-align:center;'><div><a class='nong-copy' href='" + magnetUrl + "'>复制</a></div></td>");
-                            $(trEle).find(".nong-copy").click(function(e){
+                            $(trEle).find(".nong-copy").click(function (e) {
                                 e.preventDefault();
                                 GM_setClipboard($(this).attr('href'));
                                 $(this).text("成功");
-                                setTimeout(()=>$(this).text("复制"), 1000);
+                                setTimeout(() => $(this).text("复制"), 1000);
                             });
                         }
                     };
-                    
+
                     enhanceMagnetTable();
                     const observer = new MutationObserver((mutationsList, observer) => {
-                        observer.disconnect(); 
+                        observer.disconnect();
                         enhanceMagnetTable();
                     });
                     const targetNode = document.getElementById('magnet-table');
-                    if(targetNode) observer.observe(targetNode, { childList: true });
+                    if (targetNode) observer.observe(targetNode, { childList: true });
                 }
             }
         }
@@ -1124,7 +1124,7 @@
             var $pages = $('div#waterfall div.item');
             if ($pages.length) {
                 $pages[0].parentElement.parentElement.id = "waterfall_h";
-                if ($("footer:contains('JavBus')").length) {
+                if ((/(JavBus|AVMOO|AVSOX)/g).test(document.title) || $("footer:contains('JavBus')").length) {
                     w = new thirdparty.waterfall({
                         next: 'a#next',
                         item: 'div#waterfall div.item',
@@ -1172,7 +1172,7 @@
                         for (let i = 0; i < elems.length; i++) {
                             if ($(elems[i]).find("div.avatar-box").length > 0) continue;
                             let spanEle = $(elems[i]).find("div.photo-info span")[0];
-                            if(spanEle && $(spanEle).html().indexOf("<br>") > -1){
+                            if (spanEle && $(spanEle).html().indexOf("<br>") > -1) {
                                 let t1 = $(spanEle).html().substr($(spanEle).html().indexOf("<br>") + 4);
                                 let t2 = $(spanEle).html().substr(0, $(spanEle).html().indexOf("<br>"));
                                 $(spanEle).html(t1 + "<br>" + t2);
@@ -1205,10 +1205,10 @@
                                             <span class="tag hobby" style="margin-right: 3px;background-color:#00d1b2;">OneJav</span>
                                         </a>
                                     `);
-                            
+
                             let scoresText = $(e).find('.score>span').text();
                             let scoreMatches = scoresText.match(/-?(?:\d+(?:\.\d*)?|\.\d+)/g);
-                            if(scoreMatches && scoreMatches.length >= 2) {
+                            if (scoreMatches && scoreMatches.length >= 2) {
                                 $(e).attr("score", scoreMatches[0]);
                                 $(e).attr("usernum", scoreMatches[1]);
                             }
@@ -1364,7 +1364,7 @@
                 $(this.anchor).replaceWith($end);
             };
             waterfall.prototype.reachBottom = function (elem, limit) {
-                if(!elem) return false;
+                if (!elem) return false;
                 return (elem.getBoundingClientRect().top - $(window).height()) < limit;
             };
             waterfall.prototype.scroll = function () {
@@ -1383,7 +1383,7 @@
                         resolve();
                     }).then(() => {
                         setTimeout(() => {
-                             defer.resolve();
+                            defer.resolve();
                         }, 500);
                     });
                     return defer.promise();
@@ -1415,7 +1415,7 @@
             `);
             Jav.javBusScript();
         }
-        
+
         Jav.javDBScript();
     }
     mainRun();
