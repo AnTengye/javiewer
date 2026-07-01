@@ -15,6 +15,27 @@ function createStorage(initial = {}) {
     };
 }
 
+function createScheduler() {
+    const jobs = [];
+    return {
+        schedule(fn, delay) {
+            const job = { fn, delay, cancelled: false };
+            jobs.push(job);
+            return job;
+        },
+        cancel(job) {
+            if (job) job.cancelled = true;
+        },
+        async runLatest() {
+            const job = [...jobs].reverse().find((candidate) => !candidate.cancelled);
+            assert.ok(job, 'expected a scheduled job');
+            job.cancelled = true;
+            await job.fn();
+        },
+        active: () => jobs.filter((job) => !job.cancelled)
+    };
+}
+
 test('retry delay grows exponentially and is capped at 60 seconds', () => {
     const { retryDelay } = loadTracker();
     assert.deepEqual(
@@ -114,4 +135,71 @@ test('startup retries valid due records, removes corrupt records, and logs histo
     assert.equal(storage.list().length, 0);
     assert.ok(logs.some((line) => line.includes('检测到上一次有上传失败数据，已成功重试: ABC-123')));
     assert.equal(warnings.length, 1);
+});
+
+test('list refresh waits five seconds after the latest click and batches unique codes', async () => {
+    const { createReadRefreshCoordinator } = loadTracker();
+    const scheduler = createScheduler();
+    const batches = [];
+    const coordinator = createReadRefreshCoordinator({
+        query: async (codes) => {
+            batches.push(Array.from(codes));
+            return codes.map((code) => ({ code, viewed: true }));
+        },
+        apply: () => {},
+        schedule: scheduler.schedule,
+        cancel: scheduler.cancel,
+        logger: { log() {}, warn() {} }
+    });
+
+    coordinator.collect('abc-123');
+    coordinator.collect('def-456');
+    coordinator.collect('ABC-123');
+    assert.equal(scheduler.active().length, 1);
+    assert.equal(scheduler.active()[0].delay, 5000);
+    await scheduler.runLatest();
+    assert.deepEqual(batches, [['ABC-123', 'DEF-456']]);
+});
+
+test('partial responses remain queued while successful items are applied', async () => {
+    const { createReadRefreshCoordinator } = loadTracker();
+    const scheduler = createScheduler();
+    const applied = [];
+    let calls = 0;
+    const coordinator = createReadRefreshCoordinator({
+        query: async () => ++calls === 1
+            ? [{ code: 'ABC-123', viewed: true }]
+            : [{ code: 'DEF-456', viewed: true }],
+        apply: (item) => applied.push(item.code),
+        schedule: scheduler.schedule,
+        cancel: scheduler.cancel,
+        logger: { log() {}, warn() {} }
+    });
+
+    coordinator.collect('ABC-123');
+    coordinator.collect('DEF-456');
+    await scheduler.runLatest();
+    assert.deepEqual(applied, ['ABC-123']);
+    assert.deepEqual(Array.from(coordinator.pending()), ['DEF-456']);
+    assert.equal(scheduler.active().at(-1).delay, 5000);
+});
+
+test('clicks collected during an in-flight refresh are kept for the next batch', async () => {
+    const { createReadRefreshCoordinator } = loadTracker();
+    const scheduler = createScheduler();
+    let resolveQuery;
+    const coordinator = createReadRefreshCoordinator({
+        query: () => new Promise((resolve) => { resolveQuery = resolve; }),
+        apply: () => {},
+        schedule: scheduler.schedule,
+        cancel: scheduler.cancel,
+        logger: { log() {}, warn() {} }
+    });
+
+    coordinator.collect('ABC-123');
+    const running = scheduler.runLatest();
+    coordinator.collect('DEF-456');
+    resolveQuery([{ code: 'ABC-123', viewed: true }]);
+    await running;
+    assert.deepEqual(Array.from(coordinator.pending()), ['DEF-456']);
 });

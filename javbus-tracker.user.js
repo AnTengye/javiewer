@@ -186,6 +186,71 @@
         return { enqueueAndSend, retryDue };
     }
 
+    function createReadRefreshCoordinator({
+        query,
+        apply,
+        schedule = setTimeout,
+        cancel = clearTimeout,
+        logger
+    }) {
+        const queued = new Set();
+        let timer = null;
+        let refreshing = false;
+        let failures = 0;
+
+        const arm = (delay = CONFIG.CLICK_REFRESH_DELAY) => {
+            if (timer) cancel(timer);
+            timer = schedule(flush, delay);
+        };
+
+        const flush = async () => {
+            timer = null;
+            if (refreshing || queued.size === 0) return;
+
+            refreshing = true;
+            const batch = [...queued];
+            batch.forEach((code) => queued.delete(code));
+            logger.log(`5 秒内无新增点击，批量刷新 ${batch.length} 条已读状态`);
+
+            try {
+                const results = await query(batch);
+                const requested = new Set(batch);
+                const returned = new Set();
+
+                for (const item of Array.isArray(results) ? results : []) {
+                    const code = normalizeCode(item && item.code);
+                    if (!code || !requested.has(code)) continue;
+                    returned.add(code);
+                    apply({ ...item, code });
+                }
+
+                for (const code of batch) {
+                    if (!returned.has(code)) queued.add(code);
+                }
+                failures = returned.size === batch.length ? 0 : failures + 1;
+            } catch (error) {
+                batch.forEach((code) => queued.add(code));
+                failures += 1;
+            } finally {
+                refreshing = false;
+                if (queued.size > 0) {
+                    const delay = retryDelay(failures);
+                    logger.warn(`列表状态刷新失败，将在 ${delay / 1000} 秒后重试 ${queued.size} 条记录`);
+                    arm(delay);
+                }
+            }
+        };
+
+        const collect = (code) => {
+            const normalized = normalizeCode(code);
+            if (!normalized) return;
+            queued.add(normalized);
+            arm();
+        };
+
+        return { collect, flush, pending: () => [...queued] };
+    }
+
     // ==================== 样式定义 ====================
     const STYLES = `
         .jt-badge-container {
@@ -738,6 +803,31 @@
         }
     }
 
+    function applyFreshListStatus(item) {
+        setCache(item.code, item);
+        const element = getMovieItems().get(item.code);
+        if (element) {
+            renderItemBadges(element, item);
+            processedCodes.add(item.code);
+        }
+    }
+
+    function setupListReadRefresh() {
+        const coordinator = createReadRefreshCoordinator({
+            query: batchQueryStatus,
+            apply: applyFreshListStatus,
+            logger: strategyLog
+        });
+
+        document.addEventListener('click', (event) => {
+            const link = event.target.closest?.('a[href]');
+            const item = link?.closest?.('.item, .movie-box, .photo-frame');
+            if (item) coordinator.collect(extractCode(item));
+        }, true);
+
+        return coordinator;
+    }
+
     /**
      * 处理详情页
      */
@@ -840,6 +930,7 @@
             scanAndProcess();
             setupObserver();
             setupScrollListener();
+            setupListReadRefresh();
         }
 
         console.log('[JavBus Tracker] 初始化完成');
@@ -851,7 +942,8 @@
             retryDelay,
             pendingTrackKey,
             createStrategyLogger,
-            createTrackOutbox
+            createTrackOutbox,
+            createReadRefreshCoordinator
         };
         return;
     }
