@@ -32,8 +32,46 @@
         CACHE_EXPIRY_DAYS: 30,
         BATCH_SIZE: 50,          // 每批次查询的番号数量
         DEBOUNCE_DELAY: 500,     // 防抖延迟（毫秒）
-        OBSERVER_THROTTLE: 1000  // MutationObserver 节流时间（毫秒）
+        OBSERVER_THROTTLE: 1000, // MutationObserver 节流时间（毫秒）
+        ENABLE_CONSOLE_LOG: true,
+        CLICK_REFRESH_DELAY: 5000,
+        RETRY_BASE_DELAY: 5000,
+        RETRY_MAX_DELAY: 60000,
+        PENDING_TRACK_PREFIX: 'jt_pending_track_'
     };
+
+    function normalizeCode(code) {
+        if (typeof code !== 'string') return null;
+        const normalized = code.trim().toUpperCase();
+        return /^[A-Z]+-\d+$/.test(normalized) ? normalized : null;
+    }
+
+    function retryDelay(attempts) {
+        const exponent = Math.max(0, Number(attempts || 1) - 1);
+        return Math.min(CONFIG.RETRY_BASE_DELAY * (2 ** exponent), CONFIG.RETRY_MAX_DELAY);
+    }
+
+    function pendingTrackKey(code) {
+        const normalized = normalizeCode(code);
+        return normalized ? `${CONFIG.PENDING_TRACK_PREFIX}${normalized}` : null;
+    }
+
+    function createStrategyLogger(enabled, target = console) {
+        const write = (method, message, ...args) => {
+            if (!enabled) return;
+            const output = typeof target[method] === 'function' ? target[method] : target.log;
+            if (typeof output === 'function') {
+                output.call(target, `[JavBus Tracker] ${message}`, ...args);
+            }
+        };
+        return {
+            log: (message, ...args) => write('log', message, ...args),
+            warn: (message, ...args) => write('warn', message, ...args),
+            error: (message, ...args) => write('error', message, ...args)
+        };
+    }
+
+    const strategyLog = createStrategyLogger(CONFIG.ENABLE_CONSOLE_LOG);
 
     // ==================== 样式定义 ====================
     const STYLES = `
@@ -688,6 +726,16 @@
         }
 
         console.log('[JavBus Tracker] 初始化完成');
+    }
+
+    if (globalThis.__JAVBUS_TRACKER_TEST_MODE__) {
+        globalThis.__JAVBUS_TRACKER_TEST_EXPORTS__ = {
+            normalizeCode,
+            retryDelay,
+            pendingTrackKey,
+            createStrategyLogger
+        };
+        return;
     }
 
     // 等待DOM完全加载
