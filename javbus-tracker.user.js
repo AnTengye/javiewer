@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      2.3.1
+// @version      2.4.0
 // @description  自动检索JavBus页面影视列表显示浏览状态，并集成原 JAV老司机 的瀑布流、排版优化及多站评分。
 // @author       Antengye
 // @include        *://*javbus.com/*
@@ -85,8 +85,14 @@
     }
 
     function errorMessage(error) {
-        const message = error instanceof Error ? error.message : String(error || 'unknown error');
+        const message = error && typeof error.message === 'string'
+            ? error.message
+            : String(error || 'unknown error');
         return message.slice(0, 200);
+    }
+
+    function batchItems(result) {
+        return result && Array.isArray(result.items) ? result.items : [];
     }
 
     function createTrackOutbox({
@@ -412,7 +418,7 @@
      */
     function apiRequest(path, data) {
         const url = `${CONFIG.API_BASE}${path}`;
-        console.log(`[JavBus Tracker] 请求: ${url}`, data);
+        strategyLog.log(`请求: ${url}`, data);
 
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
@@ -425,11 +431,11 @@
                 data: JSON.stringify(data),
                 timeout: 30000,
                 onload: (response) => {
-                    console.log(`[JavBus Tracker] 响应状态: ${response.status}`, response);
+                    strategyLog.log(`响应状态: ${response.status}`, response);
 
                     // 检查HTTP状态码
                     if (response.status < 200 || response.status >= 300) {
-                        console.error(`[JavBus Tracker] HTTP错误: ${response.status}`, response.responseText?.substring(0, 500));
+                        strategyLog.error(`HTTP错误: ${response.status}`, response.responseText?.substring(0, 500));
                         reject(new Error(`HTTP Error: ${response.status}`));
                         return;
                     }
@@ -442,16 +448,16 @@
                             reject(new Error(`API Error: ${result.code}`));
                         }
                     } catch (e) {
-                        console.error('[JavBus Tracker] JSON解析失败:', response.responseText?.substring(0, 500));
+                        strategyLog.error('JSON解析失败:', response.responseText?.substring(0, 500));
                         reject(new Error(`JSON Parse Error: ${e.message}`));
                     }
                 },
                 onerror: (error) => {
-                    console.error('[JavBus Tracker] 请求失败:', error);
+                    strategyLog.error('请求失败:', error);
                     reject(error);
                 },
                 ontimeout: () => {
-                    console.error('[JavBus Tracker] 请求超时');
+                    strategyLog.error('请求超时');
                     reject(new Error('Request timeout'));
                 }
             });
@@ -472,9 +478,9 @@
 
         try {
             const result = await apiRequest('/api/film/batch-status', { codes });
-            return result.items || [];
+            return batchItems(result);
         } catch (e) {
-            console.error('[JavBus Tracker] 批量查询失败:', e);
+            strategyLog.error('批量查询失败:', e);
             return [];
         }
     }
@@ -835,7 +841,7 @@
         const code = getDetailPageCode();
         if (!code) return;
 
-        console.log(`[JavBus Tracker] 详情页: ${code}`);
+        strategyLog.log(`详情页: ${code}`);
 
         // 先尝试显示缓存的状态
         const cached = getCache(code);
@@ -914,7 +920,7 @@
     // ==================== 初始化 ====================
 
     function init() {
-        console.log('[JavBus Tracker] 初始化中...');
+        strategyLog.log('初始化中...');
 
         // 不阻塞页面初始化，后台恢复历史失败记录。
         trackOutbox.retryDue();
@@ -933,7 +939,7 @@
             setupListReadRefresh();
         }
 
-        console.log('[JavBus Tracker] 初始化完成');
+        strategyLog.log('初始化完成');
     }
 
     if (globalThis.__JAVBUS_TRACKER_TEST_MODE__) {
@@ -943,7 +949,9 @@
             pendingTrackKey,
             createStrategyLogger,
             createTrackOutbox,
-            createReadRefreshCoordinator
+            createReadRefreshCoordinator,
+            errorMessage,
+            batchItems
         };
         return;
     }

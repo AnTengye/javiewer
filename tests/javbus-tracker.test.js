@@ -203,3 +203,20 @@ test('clicks collected during an in-flight refresh are kept for the next batch',
     await running;
     assert.deepEqual(Array.from(coordinator.pending()), ['DEF-456']);
 });
+
+test('error text is bounded and non-error values are supported', () => {
+    const { errorMessage } = loadTracker();
+    assert.equal(errorMessage('offline'), 'offline');
+    assert.equal(errorMessage(new Error('x'.repeat(300))).length, 200);
+});
+
+test('batch status treats a malformed payload as an empty result', () => {
+    const { batchItems } = loadTracker();
+    assert.deepEqual(Array.from(batchItems(null)), []);
+    assert.deepEqual(Array.from(batchItems({})), []);
+    assert.deepEqual(Array.from(batchItems({ items: 'bad' })), []);
+    assert.deepEqual(
+        Array.from(batchItems({ items: [{ code: 'ABC-123' }] }), (item) => ({ ...item })),
+        [{ code: 'ABC-123' }]
+    );
+});
