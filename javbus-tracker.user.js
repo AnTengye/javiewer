@@ -13,6 +13,8 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_listValues
+// @grant        GM_deleteValue
 // @grant        GM_addStyle
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
@@ -72,6 +74,117 @@
     }
 
     const strategyLog = createStrategyLogger(CONFIG.ENABLE_CONSOLE_LOG);
+
+    function createGMStorage() {
+        return {
+            get: (key, fallback = null) => GM_getValue(key, fallback),
+            set: (key, value) => GM_setValue(key, value),
+            remove: (key) => GM_deleteValue(key),
+            list: () => GM_listValues()
+        };
+    }
+
+    function errorMessage(error) {
+        const message = error instanceof Error ? error.message : String(error || 'unknown error');
+        return message.slice(0, 200);
+    }
+
+    function createTrackOutbox({
+        storage,
+        request,
+        now = Date.now,
+        schedule = setTimeout,
+        cancel = clearTimeout,
+        logger
+    }) {
+        let retryTimer = null;
+
+        const listRecords = () => storage.list()
+            .filter((key) => key.startsWith(CONFIG.PENDING_TRACK_PREFIX))
+            .map((key) => ({ key, value: storage.get(key, null) }));
+
+        const isValid = ({ key, value }) => value &&
+            pendingTrackKey(value.code) === key &&
+            Number.isFinite(value.createdAt) &&
+            Number.isFinite(value.attempts) &&
+            Number.isFinite(value.nextRetryAt);
+
+        const armNextRetry = () => {
+            if (retryTimer) cancel(retryTimer);
+            const next = listRecords()
+                .filter(isValid)
+                .reduce((minimum, item) => Math.min(minimum, item.value.nextRetryAt), Infinity);
+            retryTimer = Number.isFinite(next)
+                ? schedule(() => retryDue(), Math.max(0, next - now()))
+                : null;
+        };
+
+        const sendRecord = async (record, historical) => {
+            try {
+                await request(record.code);
+                storage.remove(pendingTrackKey(record.code));
+                logger.log(historical
+                    ? `检测到上一次有上传失败数据，已成功重试: ${record.code}`
+                    : `已上报查看: ${record.code}`);
+                return true;
+            } catch (error) {
+                const attempts = Number(record.attempts || 0) + 1;
+                const delay = retryDelay(attempts);
+                storage.set(pendingTrackKey(record.code), {
+                    ...record,
+                    updatedAt: now(),
+                    attempts,
+                    nextRetryAt: now() + delay,
+                    lastError: errorMessage(error)
+                });
+                logger.warn(`网络异常，已保存待补报记录，将在 ${delay / 1000} 秒后重试: ${record.code}`);
+                return false;
+            }
+        };
+
+        const retryDue = async () => {
+            const records = listRecords();
+            const due = [];
+
+            for (const item of records) {
+                if (!isValid(item)) {
+                    storage.remove(item.key);
+                    logger.warn(`已清理损坏的待补报记录: ${item.key}`);
+                } else if (item.value.nextRetryAt <= now()) {
+                    due.push(item.value);
+                }
+            }
+
+            if (due.length > 0) {
+                logger.log(`检测到 ${due.length} 条历史上传失败记录，开始重试`);
+            }
+            await Promise.all(due.map((record) => sendRecord(record, true)));
+            armNextRetry();
+        };
+
+        const enqueueAndSend = async (code) => {
+            const normalized = normalizeCode(code);
+            if (!normalized) return false;
+
+            const key = pendingTrackKey(normalized);
+            const existing = storage.get(key, null);
+            const record = existing && pendingTrackKey(existing.code) === key ? existing : {
+                code: normalized,
+                createdAt: now(),
+                updatedAt: now(),
+                attempts: 0,
+                nextRetryAt: now(),
+                lastError: ''
+            };
+
+            storage.set(key, record);
+            const success = await sendRecord(record, false);
+            armNextRetry();
+            return success;
+        };
+
+        return { enqueueAndSend, retryDue };
+    }
 
     // ==================== 样式定义 ====================
     const STYLES = `
@@ -280,6 +393,12 @@
         });
     }
 
+    const trackOutbox = createTrackOutbox({
+        storage: createGMStorage(),
+        request: (code) => apiRequest('/api/film/track', { code }),
+        logger: strategyLog
+    });
+
     /**
      * 批量查询番号状态
      */
@@ -299,16 +418,11 @@
      * 上报查看记录
      */
     async function trackView(code) {
-        try {
-            const result = await apiRequest('/api/film/track', { code });
-            // 清除缓存以便下次刷新状态
+        const success = await trackOutbox.enqueueAndSend(code);
+        if (success) {
             clearCache(code);
-            console.log(`[JavBus Tracker] 已上报查看: ${code}`);
-            return result;
-        } catch (e) {
-            console.error('[JavBus Tracker] 上报失败:', e);
-            return null;
         }
+        return success;
     }
 
     /**
@@ -712,6 +826,9 @@
     function init() {
         console.log('[JavBus Tracker] 初始化中...');
 
+        // 不阻塞页面初始化，后台恢复历史失败记录。
+        trackOutbox.retryDue();
+
         // 注入样式
         injectStyles();
 
@@ -733,7 +850,8 @@
             normalizeCode,
             retryDelay,
             pendingTrackKey,
-            createStrategyLogger
+            createStrategyLogger,
+            createTrackOutbox
         };
         return;
     }
