@@ -16,7 +16,7 @@
 // @grant        GM_addStyle
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
-// @connect      qqq.bigorange.work
+// @connect      f.bigorange.work
 // @connect      *
 // @run-at       document-idle
 // ==/UserScript==
@@ -28,7 +28,7 @@
 
     // ==================== 配置 ====================
     const CONFIG = {
-        API_BASE: 'https://qqq.bigorange.work',
+        API_BASE: 'https://f.bigorange.work',
         CACHE_EXPIRY_DAYS: 30,
         BATCH_SIZE: 50,          // 每批次查询的番号数量
         DEBOUNCE_DELAY: 500,     // 防抖延迟（毫秒）
