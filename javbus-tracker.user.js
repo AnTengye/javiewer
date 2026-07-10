@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      2.4.0
+// @version      2.5.0
 // @description  自动检索JavBus页面影视列表显示浏览状态，并集成原 JAV老司机 的瀑布流、排版优化及多站评分。
 // @author       Antengye
 // @include        *://*javbus.com/*
@@ -94,6 +94,18 @@
     function batchItems(result) {
         return result && Array.isArray(result.items) ? result.items : [];
     }
+
+    function getLargePreviewImageUrl(url) {
+        if (typeof url !== 'string' || url.length === 0) return url;
+
+        return url
+            .replace(/\/ps\.jpg(?=([?#].*)?$)/i, '/pl.jpg')
+            .replace(/\/([^/?#]+)-(\d+)\.jpg(?=([?#].*)?$)/i, (match, prefix, index) => {
+                return prefix.toLowerCase().endsWith('jp') ? match : `/${prefix}jp-${index}.jpg`;
+            });
+    }
+
+    globalThis.__JAVBUS_TRACKER_GET_LARGE_PREVIEW_IMAGE_URL__ = getLargePreviewImageUrl;
 
     function createTrackOutbox({
         storage,
@@ -951,7 +963,8 @@
             createTrackOutbox,
             createReadRefreshCoordinator,
             errorMessage,
-            batchItems
+            batchItems,
+            getLargePreviewImageUrl
         };
         return;
     }
@@ -972,6 +985,7 @@
     const JAVDB_ITEM_SELECTOR = '.movie-list.v.cols-4.vcols-8 .item, .movie-list.v.cols-4.vcols-5 .item, .movie-list.h.cols-4.vcols-8 .item, .movie-list.h.cols-4.vcols-5 .item';
     const JAVDB_DOMAIN = 'javdb368.com';
     const MMTV_DOMAIN = '7mmtv.sx';
+    const getLargePreviewImageUrl = globalThis.__JAVBUS_TRACKER_GET_LARGE_PREVIEW_IMAGE_URL__ || ((url) => url);
 
     // 瀑布流状态：1：开启、0：关闭
     let waterfallScrollStatus = GM_getValue('scroll_status', 1);
@@ -1206,6 +1220,26 @@
             return a3;
         }
 
+        static enhanceSamplePreviewImages() {
+            $('#sample-waterfall>a').each((index, element) => {
+                const largeHref = getLargePreviewImageUrl(element.href);
+                if (largeHref && largeHref !== element.href) {
+                    element.href = largeHref;
+                }
+
+                const image = $(element).find('img')[0];
+                if (!image) return;
+
+                const sourceUrl = image.currentSrc || image.src || image.getAttribute('data-src');
+                const largeSrc = getLargePreviewImageUrl(sourceUrl);
+                if (!largeSrc || largeSrc === image.src) return;
+
+                image.src = largeSrc;
+                image.removeAttribute('srcset');
+                image.removeAttribute('data-src');
+            });
+        }
+
         static javBusScript() {
             let a3 = this.waterfallButton();
             if ((/(JavBus|AVMOO|AVSOX)/g).test(document.title) || $("footer:contains('JavBus')").length) {
@@ -1230,6 +1264,8 @@
 
                     $('p.header').before('<p id="zuobiao"></p>');
                     let $p_zuobiao = $('#zuobiao');
+
+                    this.enhanceSamplePreviewImages();
 
                     let a_imgs = $('#sample-waterfall>a');
                     if (a_imgs.length && !$('a.avatar-box[href*="uncensored"]').length && !location.hostname.includes('javbus.org')

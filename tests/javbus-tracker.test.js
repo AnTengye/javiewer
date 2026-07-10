@@ -220,3 +220,28 @@ test('batch status treats a malformed payload as an empty result', () => {
         [{ code: 'ABC-123' }]
     );
 });
+
+test('preview image URLs are upgraded from DMM thumbnails to large images', () => {
+    const { getLargePreviewImageUrl } = loadTracker();
+
+    assert.equal(
+        getLargePreviewImageUrl('https://pics.dmm.co.jp/digital/video/ssis00123/ssis00123-1.jpg'),
+        'https://pics.dmm.co.jp/digital/video/ssis00123/ssis00123jp-1.jpg'
+    );
+    assert.equal(
+        getLargePreviewImageUrl('https://pics.dmm.co.jp/digital/video/ssis00123/ssis00123-1.jpg?foo=1'),
+        'https://pics.dmm.co.jp/digital/video/ssis00123/ssis00123jp-1.jpg?foo=1'
+    );
+    assert.equal(
+        getLargePreviewImageUrl('https://pics.dmm.co.jp/digital/video/ssis00123/ssis00123jp-1.jpg'),
+        'https://pics.dmm.co.jp/digital/video/ssis00123/ssis00123jp-1.jpg'
+    );
+    assert.equal(
+        getLargePreviewImageUrl('https://pics.dmm.co.jp/digital/video/ssis00123/ps.jpg'),
+        'https://pics.dmm.co.jp/digital/video/ssis00123/pl.jpg'
+    );
+    assert.equal(
+        getLargePreviewImageUrl('https://example.com/page.html'),
+        'https://example.com/page.html'
+    );
+});
