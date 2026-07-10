@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      2.5.0
+// @version      2.5.1
 // @description  自动检索JavBus页面影视列表显示浏览状态，并集成原 JAV老司机 的瀑布流、排版优化及多站评分。
 // @author       Antengye
 // @include        *://*javbus.com/*
@@ -105,7 +105,15 @@
             });
     }
 
+    function resolveLargePreviewImageUrl(imageUrl, linkUrl) {
+        const largeLinkUrl = getLargePreviewImageUrl(linkUrl);
+        if (largeLinkUrl && largeLinkUrl !== linkUrl) return largeLinkUrl;
+        if (largeLinkUrl && /\/pics\.dmm\.co\.jp\//i.test(largeLinkUrl)) return largeLinkUrl;
+        return getLargePreviewImageUrl(imageUrl);
+    }
+
     globalThis.__JAVBUS_TRACKER_GET_LARGE_PREVIEW_IMAGE_URL__ = getLargePreviewImageUrl;
+    globalThis.__JAVBUS_TRACKER_RESOLVE_LARGE_PREVIEW_IMAGE_URL__ = resolveLargePreviewImageUrl;
 
     function createTrackOutbox({
         storage,
@@ -964,7 +972,8 @@
             createReadRefreshCoordinator,
             errorMessage,
             batchItems,
-            getLargePreviewImageUrl
+            getLargePreviewImageUrl,
+            resolveLargePreviewImageUrl
         };
         return;
     }
@@ -986,6 +995,7 @@
     const JAVDB_DOMAIN = 'javdb368.com';
     const MMTV_DOMAIN = '7mmtv.sx';
     const getLargePreviewImageUrl = globalThis.__JAVBUS_TRACKER_GET_LARGE_PREVIEW_IMAGE_URL__ || ((url) => url);
+    const resolveLargePreviewImageUrl = globalThis.__JAVBUS_TRACKER_RESOLVE_LARGE_PREVIEW_IMAGE_URL__ || ((imageUrl) => imageUrl);
 
     // 瀑布流状态：1：开启、0：关闭
     let waterfallScrollStatus = GM_getValue('scroll_status', 1);
@@ -1231,9 +1241,10 @@
                 if (!image) return;
 
                 const sourceUrl = image.currentSrc || image.src || image.getAttribute('data-src');
-                const largeSrc = getLargePreviewImageUrl(sourceUrl);
+                const largeSrc = resolveLargePreviewImageUrl(sourceUrl, element.href);
                 if (!largeSrc || largeSrc === image.src) return;
 
+                element.classList.add('jt-large-preview');
                 image.src = largeSrc;
                 image.removeAttribute('srcset');
                 image.removeAttribute('data-src');
@@ -1246,6 +1257,21 @@
                 GM_addStyle(`
                     .info p {line-height: 18px!important;}
                     .screencap img{	width:100%;	max-width: 1000px;}
+                    #sample-waterfall .sample-box.jt-large-preview {
+                        display: block !important;
+                        width: 100% !important;
+                        height: auto !important;
+                        margin: 0 0 14px 0 !important;
+                    }
+                    #sample-waterfall .sample-box.jt-large-preview .photo-frame {
+                        width: auto !important;
+                        height: auto !important;
+                    }
+                    #sample-waterfall .sample-box.jt-large-preview img {
+                        width: 100% !important;
+                        max-width: 1000px !important;
+                        height: auto !important;
+                    }
                 `);
 
                 $('#navbar ul.nav.navbar-nav li:eq(0)').after(`<li><a href="https://onejav.com/popular/?amateur=1" target="_blank" style="color: red;">FC2</a></li>`);

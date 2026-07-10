@@ -222,7 +222,7 @@ test('batch status treats a malformed payload as an empty result', () => {
 });
 
 test('preview image URLs are upgraded from DMM thumbnails to large images', () => {
-    const { getLargePreviewImageUrl } = loadTracker();
+    const { getLargePreviewImageUrl, resolveLargePreviewImageUrl } = loadTracker();
 
     assert.equal(
         getLargePreviewImageUrl('https://pics.dmm.co.jp/digital/video/ssis00123/ssis00123-1.jpg'),
@@ -243,5 +243,12 @@ test('preview image URLs are upgraded from DMM thumbnails to large images', () =
     assert.equal(
         getLargePreviewImageUrl('https://example.com/page.html'),
         'https://example.com/page.html'
+    );
+    assert.equal(
+        resolveLargePreviewImageUrl(
+            'https://www.javbus.com/pics/sample/83ie_1.jpg',
+            'https://pics.dmm.co.jp/digital/video/ssis00001/ssis00001jp-1.jpg'
+        ),
+        'https://pics.dmm.co.jp/digital/video/ssis00001/ssis00001jp-1.jpg'
     );
 });
