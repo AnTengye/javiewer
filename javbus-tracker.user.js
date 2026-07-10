@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      2.5.1
+// @version      2.5.2
 // @description  自动检索JavBus页面影视列表显示浏览状态，并集成原 JAV老司机 的瀑布流、排版优化及多站评分。
 // @author       Antengye
 // @include        *://*javbus.com/*
@@ -105,10 +105,17 @@
             });
     }
 
+    function isPreviewImageUrl(url) {
+        return typeof url === 'string' && /\.(jpe?g|png|webp)(?=([?#].*)?$)/i.test(url);
+    }
+
     function resolveLargePreviewImageUrl(imageUrl, linkUrl) {
+        if (isPreviewImageUrl(linkUrl)) {
+            return /\/pics\.dmm\.co\.jp\//i.test(linkUrl) ? getLargePreviewImageUrl(linkUrl) : linkUrl;
+        }
+
         const largeLinkUrl = getLargePreviewImageUrl(linkUrl);
-        if (largeLinkUrl && largeLinkUrl !== linkUrl) return largeLinkUrl;
-        if (largeLinkUrl && /\/pics\.dmm\.co\.jp\//i.test(largeLinkUrl)) return largeLinkUrl;
+        if (largeLinkUrl && largeLinkUrl !== linkUrl && isPreviewImageUrl(largeLinkUrl)) return largeLinkUrl;
         return getLargePreviewImageUrl(imageUrl);
     }
 
@@ -973,6 +980,7 @@
             errorMessage,
             batchItems,
             getLargePreviewImageUrl,
+            isPreviewImageUrl,
             resolveLargePreviewImageUrl
         };
         return;
@@ -1232,11 +1240,6 @@
 
         static enhanceSamplePreviewImages() {
             $('#sample-waterfall>a').each((index, element) => {
-                const largeHref = getLargePreviewImageUrl(element.href);
-                if (largeHref && largeHref !== element.href) {
-                    element.href = largeHref;
-                }
-
                 const image = $(element).find('img')[0];
                 if (!image) return;
 
@@ -1244,10 +1247,32 @@
                 const largeSrc = resolveLargePreviewImageUrl(sourceUrl, element.href);
                 if (!largeSrc || largeSrc === image.src) return;
 
+                element.href = largeSrc;
                 element.classList.add('jt-large-preview');
                 image.src = largeSrc;
                 image.removeAttribute('srcset');
                 image.removeAttribute('data-src');
+            });
+        }
+
+        static collapseMagnetTable() {
+            const table = document.getElementById('magnet-table');
+            if (!table || document.getElementById('jt-magnet-toggle')) return;
+
+            const button = document.createElement('button');
+            button.id = 'jt-magnet-toggle';
+            button.type = 'button';
+            button.className = 'btn btn-default btn-sm';
+            button.textContent = '展开磁力链接';
+            button.style.margin = '0 0 10px 0';
+
+            table.style.display = 'none';
+            table.parentNode.insertBefore(button, table);
+
+            button.addEventListener('click', () => {
+                const hidden = table.style.display === 'none';
+                table.style.display = hidden ? '' : 'none';
+                button.textContent = hidden ? '隐藏磁力链接' : '展开磁力链接';
             });
         }
 
@@ -1337,6 +1362,7 @@
 
                     // 简单增强磁力表格复制功能
                     $('#magnet-table tbody tr').append('<td style="text-align:center;white-space:nowrap">操作</td>');
+                    this.collapseMagnetTable();
 
                     const enhanceMagnetTable = () => {
                         let tr_array = $('#magnet-table tr[height="35px"]');

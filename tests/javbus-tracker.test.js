@@ -251,4 +251,11 @@ test('preview image URLs are upgraded from DMM thumbnails to large images', () =
         ),
         'https://pics.dmm.co.jp/digital/video/ssis00001/ssis00001jp-1.jpg'
     );
+    assert.equal(
+        resolveLargePreviewImageUrl(
+            'https://www.javbus.com/pics/sample/cd8j_1.jpg',
+            'https://image.mgstage.com/images/jackson/390jac/235/cap_e_0_390jac-235.jpg'
+        ),
+        'https://image.mgstage.com/images/jackson/390jac/235/cap_e_0_390jac-235.jpg'
+    );
 });
