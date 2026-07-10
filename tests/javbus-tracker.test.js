@@ -258,4 +258,18 @@ test('preview image URLs are upgraded from DMM thumbnails to large images', () =
         ),
         'https://image.mgstage.com/images/jackson/390jac/235/cap_e_0_390jac-235.jpg'
     );
+    assert.equal(
+        resolveLargePreviewImageUrl(
+            'https://www.javbus.com/pics/sample/unknown_1.jpg',
+            'https://cdn.example.test/gallery/vendor-235.webp?token=abc'
+        ),
+        'https://cdn.example.test/gallery/vendor-235.webp?token=abc'
+    );
+    assert.equal(
+        resolveLargePreviewImageUrl(
+            'https://www.javbus.com/pics/sample/unknown_2.jpg',
+            'https://cdn.example.test/gallery/vendor-235.avif'
+        ),
+        'https://cdn.example.test/gallery/vendor-235.avif'
+    );
 });

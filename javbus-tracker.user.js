@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      2.5.2
+// @version      2.5.3
 // @description  自动检索JavBus页面影视列表显示浏览状态，并集成原 JAV老司机 的瀑布流、排版优化及多站评分。
 // @author       Antengye
 // @include        *://*javbus.com/*
@@ -106,7 +106,7 @@
     }
 
     function isPreviewImageUrl(url) {
-        return typeof url === 'string' && /\.(jpe?g|png|webp)(?=([?#].*)?$)/i.test(url);
+        return typeof url === 'string' && /\.(jpe?g|png|webp|avif|gif)(?=([?#].*)?$)/i.test(url);
     }
 
     function resolveLargePreviewImageUrl(imageUrl, linkUrl) {
