@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      2.5.3
+// @version      2.5.4
 // @description  自动检索JavBus页面影视列表显示浏览状态，并集成原 JAV老司机 的瀑布流、排版优化及多站评分。
 // @author       Antengye
 // @include        *://*javbus.com/*
@@ -576,6 +576,67 @@
         return null;
     }
 
+    function addMovieItem(items, code, element) {
+        const normalized = normalizeCode(code);
+        if (!normalized || !element) return;
+
+        let elements = items.get(normalized);
+        if (!elements) {
+            elements = new Set();
+            items.set(normalized, elements);
+        }
+
+        // 同一张卡片会同时命中 .item、.movie-box 和 .photo-frame。
+        // 保留最外层的卡片节点，避免一个卡片重复渲染多个徽章。
+        for (const existing of elements) {
+            if (existing === element || existing.contains?.(element)) return;
+        }
+
+        for (const existing of [...elements]) {
+            if (element.contains?.(existing)) elements.delete(existing);
+        }
+
+        elements.add(element);
+    }
+
+    function forEachMovieItem(movieItems, code, callback) {
+        const normalized = normalizeCode(code);
+        const elements = normalized ? movieItems.get(normalized) : null;
+        if (!elements || elements.size === 0) return false;
+
+        for (const element of elements) callback(element);
+        return true;
+    }
+
+    function collectPendingMovieCodes(movieItems, processed, pending) {
+        for (const [code, elements] of movieItems) {
+            // 动态分页可能在番号已处理后追加同番号的新卡片。
+            // 任一当前卡片缺少徽章时，都让该番号重新进入处理队列。
+            const hasUnrenderedItem = [...elements].some(
+                (element) => !element.querySelector('.jt-badge-container')
+            );
+            if (processed.has(code) && hasUnrenderedItem) {
+                processed.delete(code);
+            }
+            if (!processed.has(code) && !pending.includes(code)) {
+                pending.push(code);
+            }
+        }
+    }
+
+    function mutationsContainMovieItems(mutations) {
+        for (const mutation of mutations) {
+            for (const node of mutation.addedNodes || []) {
+                if (node.nodeType !== 1) continue;
+                if (node.matches?.('.item, .movie-box, .photo-frame') ||
+                    node.querySelector?.('.item, .movie-box, .photo-frame')) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     /**
      * 获取页面上所有影视项
      */
@@ -588,14 +649,12 @@
             '.photo-frame'                 // 图片框架
         ];
 
-        const items = new Map(); // 使用Map去重
+        const items = new Map(); // 番号 -> 同一番号对应的所有卡片节点
 
         for (const selector of selectors) {
             document.querySelectorAll(selector).forEach(el => {
                 const code = extractCode(el);
-                if (code && !items.has(code)) {
-                    items.set(code, el);
-                }
+                if (code) addMovieItem(items, code, el);
             });
         }
 
@@ -781,9 +840,7 @@
         // 应用缓存结果
         const movieItems = getMovieItems();
         for (const [code, status] of cachedResults) {
-            const element = movieItems.get(code);
-            if (element) {
-                renderItemBadges(element, status);
+            if (forEachMovieItem(movieItems, code, (element) => renderItemBadges(element, status))) {
                 // 仅在成功渲染后标记处理，避免DOM临时缺失导致后续不再补渲染
                 processedCodes.add(code);
             }
@@ -803,9 +860,7 @@
                     setCache(code, item);
 
                     // 渲染UI
-                    const element = movieItems.get(code);
-                    if (element) {
-                        renderItemBadges(element, item);
+                    if (forEachMovieItem(movieItems, code, (element) => renderItemBadges(element, item))) {
                         // 仅在成功渲染后标记处理，避免DOM变更后遗漏
                         processedCodes.add(code);
                     }
@@ -820,16 +875,7 @@
      */
     function scanAndProcess() {
         const movieItems = getMovieItems();
-
-        for (const [code, element] of movieItems) {
-            // DOM可能被瀑布流/懒加载替换：若已处理但当前节点无徽章，允许重新渲染
-            if (processedCodes.has(code) && !element.querySelector('.jt-badge-container')) {
-                processedCodes.delete(code);
-            }
-            if (!processedCodes.has(code) && !pendingCodes.includes(code)) {
-                pendingCodes.push(code);
-            }
-        }
+        collectPendingMovieCodes(movieItems, processedCodes, pendingCodes);
 
         if (pendingCodes.length > 0) {
             processPendingQueue();
@@ -838,9 +884,7 @@
 
     function applyFreshListStatus(item) {
         setCache(item.code, item);
-        const element = getMovieItems().get(item.code);
-        if (element) {
-            renderItemBadges(element, item);
+        if (forEachMovieItem(getMovieItems(), item.code, (element) => renderItemBadges(element, item))) {
             processedCodes.add(item.code);
         }
     }
@@ -894,25 +938,7 @@
         const throttledScan = throttle(scanAndProcess, CONFIG.OBSERVER_THROTTLE);
 
         const observer = new MutationObserver((mutations) => {
-            let hasNewItems = false;
-
-            for (const mutation of mutations) {
-                if (mutation.addedNodes.length > 0) {
-                    for (const node of mutation.addedNodes) {
-                        if (node.nodeType === Node.ELEMENT_NODE) {
-                            // 检查是否是影视项或包含影视项
-                            if (node.matches?.('.item, .movie-box') ||
-                                node.querySelector?.('.item, .movie-box')) {
-                                hasNewItems = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if (hasNewItems) break;
-            }
-
-            if (hasNewItems) {
+            if (mutationsContainMovieItems(mutations)) {
                 throttledScan();
             }
         });
@@ -979,6 +1005,12 @@
             createReadRefreshCoordinator,
             errorMessage,
             batchItems,
+            extractCode,
+            addMovieItem,
+            forEachMovieItem,
+            collectPendingMovieCodes,
+            mutationsContainMovieItems,
+            getMovieItems,
             getLargePreviewImageUrl,
             isPreviewImageUrl,
             resolveLargePreviewImageUrl

@@ -221,6 +221,75 @@ test('batch status treats a malformed payload as an empty result', () => {
     );
 });
 
+function createMovieElement(name, { badge = false, children = [] } = {}) {
+    return {
+        name,
+        badge,
+        children,
+        contains(element) {
+            return this.children.includes(element);
+        },
+        querySelector(selector) {
+            return selector === '.jt-badge-container' && this.badge ? {} : null;
+        }
+    };
+}
+
+test('duplicate codes keep every distinct card but ignore overlapping selectors', () => {
+    const { addMovieItem, forEachMovieItem } = loadTracker();
+    const firstPhoto = createMovieElement('first photo');
+    const firstCard = createMovieElement('first card', { children: [firstPhoto] });
+    const secondCard = createMovieElement('second card');
+    const movieItems = new Map();
+
+    addMovieItem(movieItems, 'tldc-056', firstCard);
+    addMovieItem(movieItems, 'TLDC-056', secondCard);
+    addMovieItem(movieItems, 'TLDC-056', firstPhoto);
+    addMovieItem(movieItems, 'TLDC-056', firstCard);
+
+    const rendered = [];
+    assert.equal(forEachMovieItem(movieItems, 'TLDC-056', (element) => rendered.push(element.name)), true);
+    assert.deepEqual(rendered, ['first card', 'second card']);
+});
+
+test('dynamic pagination requeues a processed code when a new duplicate card appears', () => {
+    const {
+        addMovieItem,
+        collectPendingMovieCodes,
+        forEachMovieItem,
+        mutationsContainMovieItems
+    } = loadTracker();
+    const firstCard = createMovieElement('initial card', { badge: true });
+    const movieItems = new Map();
+    const processed = new Set(['TLDC-056']);
+    const pending = [];
+
+    addMovieItem(movieItems, 'TLDC-056', firstCard);
+    collectPendingMovieCodes(movieItems, processed, pending);
+    assert.deepEqual(pending, []);
+
+    const appendedCard = createMovieElement('dynamically appended card');
+    addMovieItem(movieItems, 'TLDC-056', appendedCard);
+    assert.equal(mutationsContainMovieItems([{
+        addedNodes: [{
+            nodeType: 1,
+            matches: () => true,
+            querySelector: () => null
+        }]
+    }]), true);
+
+    collectPendingMovieCodes(movieItems, processed, pending);
+    assert.deepEqual(pending, ['TLDC-056']);
+    assert.equal(processed.has('TLDC-056'), false);
+
+    const rerendered = [];
+    forEachMovieItem(movieItems, 'TLDC-056', (element) => {
+        element.badge = true;
+        rerendered.push(element.name);
+    });
+    assert.deepEqual(rerendered, ['initial card', 'dynamically appended card']);
+});
+
 test('preview image URLs are upgraded from DMM thumbnails to large images', () => {
     const { getLargePreviewImageUrl, resolveLargePreviewImageUrl } = loadTracker();
 
