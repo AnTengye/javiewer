@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      2.7.1
+// @version      2.8.0
 // @description  自动检索JavBus页面影视列表显示浏览状态，并集成原 JAV老司机 的瀑布流、排版优化及多站评分。
 // @author       Antengye
 // @include        *://*javbus.com/*
@@ -1035,7 +1035,7 @@
     const JAVDB_ITEM_SELECTOR = '.movie-list.v.cols-4.vcols-8 .item, .movie-list.v.cols-4.vcols-5 .item, .movie-list.h.cols-4.vcols-8 .item, .movie-list.h.cols-4.vcols-5 .item';
     const JAVDB_DOMAIN = 'javdb.com';
     const MMTV_DOMAIN = '7mmtv.sx';
-    const NAS_URL_TEMPLATE_KEY = 'nas_url_template';
+    const NAS_QBITTORRENT_URL_KEY = 'nas_qbittorrent_url';
     const PREVIEW_SOURCE_KEY = 'preview_image_source';
     const JAVINFO_API_KEY_KEY = 'javinfo_api_key';
     const JAVINFO_PREVIEW_CACHE_PREFIX = 'javinfo_preview_cache_';
@@ -1107,93 +1107,121 @@
         window.location.reload();
     }
 
-    function getNasUrlTemplate() {
-        return String(GM_getValue(NAS_URL_TEMPLATE_KEY, '') || '').trim();
-    }
-
-    function renderNasUrl(template, { magnet, name, code }) {
-        const values = {
-            '{magnet}': encodeURIComponent(magnet),
-            '{magnetRaw}': magnet,
-            '{name}': encodeURIComponent(name),
-            '{nameRaw}': name,
-            '{code}': encodeURIComponent(code),
-            '{codeRaw}': code
-        };
-
-        return Object.entries(values).reduce(
-            (url, [variable, value]) => url.split(variable).join(value),
-            template
-        );
-    }
-
-    function validateNasUrlTemplate(template) {
-        if (!/\{magnet(?:Raw)?\}/.test(template)) {
-            return '地址模板必须包含 {magnet} 或 {magnetRaw}';
-        }
+    function normalizeNasQbittorrentUrl(value) {
+        let address = String(value || '').trim();
+        if (!address) return { url: '', error: '请输入 qBittorrent WebUI 地址' };
+        if (!/^[a-z][a-z\d+.-]*:\/\//i.test(address)) address = `http://${address}`;
 
         try {
-            const exampleUrl = renderNasUrl(template, {
-                magnet: 'magnet:?xt=urn:btih:example&dn=example',
-                name: 'example',
-                code: 'ABC-123'
-            });
-            const parsed = new URL(exampleUrl);
+            const parsed = new URL(address);
             if (!['http:', 'https:'].includes(parsed.protocol)) {
-                return 'NAS 地址仅支持 http:// 或 https://';
+                return { url: '', error: 'qBittorrent 地址仅支持 http:// 或 https://' };
             }
+            if (parsed.username || parsed.password) {
+                return { url: '', error: '请勿在 qBittorrent 地址中填写用户名或密码' };
+            }
+            if (parsed.search || parsed.hash) {
+                return { url: '', error: 'qBittorrent 地址不能包含查询参数或锚点' };
+            }
+
+            const path = parsed.pathname
+                .replace(/\/api\/v2\/torrents\/add\/?$/i, '')
+                .replace(/\/api\/v2\/?$/i, '')
+                .replace(/\/+$/, '');
+            return { url: `${parsed.origin}${path}`, error: '' };
         } catch (error) {
-            return 'NAS 地址模板不是有效的网址';
+            return { url: '', error: 'qBittorrent WebUI 地址格式无效' };
         }
-        return '';
     }
 
-    function configureNasUrlTemplate() {
-        const current = getNasUrlTemplate();
-        const template = window.prompt(
-            '设置一键 NAS 地址模板\n\n' +
-            '可用变量：\n' +
-            '{magnet}  URL 编码后的磁力链接（推荐）\n' +
-            '{magnetRaw}  原始磁力链接\n' +
-            '{name} / {nameRaw}  任务名称\n' +
-            '{code} / {codeRaw}  当前番号\n\n' +
-            '示例：https://nas.example/add?url={magnet}&name={name}',
+    function getNasQbittorrentUrl() {
+        return String(GM_getValue(NAS_QBITTORRENT_URL_KEY, '') || '').trim();
+    }
+
+    function configureNasQbittorrentUrl() {
+        const current = getNasQbittorrentUrl();
+        const value = window.prompt(
+            '设置 NAS qBittorrent WebUI 地址\n\n' +
+            '一键 NAS 会直接调用 qBittorrent Web API 添加磁力链接。\n' +
+            '地址只保存在当前浏览器的油猴脚本存储中。\n\n' +
+            '示例：http://nas.example:8080',
             current
         );
-        if (template === null) return null;
+        if (value === null) return null;
 
-        const normalized = template.trim();
-        if (!normalized) {
-            GM_setValue(NAS_URL_TEMPLATE_KEY, '');
-            window.alert('已清除一键 NAS 地址');
-            return '';
-        }
-
-        const error = validateNasUrlTemplate(normalized);
-        if (error) {
-            window.alert(error);
+        if (!value.trim()) {
+            GM_deleteValue(NAS_QBITTORRENT_URL_KEY);
+            GM_deleteValue('nas_url_template');
+            window.alert('已清除 NAS qBittorrent 地址');
             return null;
         }
 
-        GM_setValue(NAS_URL_TEMPLATE_KEY, normalized);
-        window.alert('一键 NAS 地址已保存到当前浏览器');
-        return normalized;
-    }
-
-    function openNasUrl({ magnet, name, code }) {
-        let template = getNasUrlTemplate();
-        if (!template) template = configureNasUrlTemplate();
-        if (!template) return false;
-
-        const error = validateNasUrlTemplate(template);
-        if (error) {
-            window.alert(`${error}，请重新设置`);
-            template = configureNasUrlTemplate();
-            if (!template) return false;
+        const normalized = normalizeNasQbittorrentUrl(value);
+        if (normalized.error) {
+            window.alert(normalized.error);
+            return null;
         }
 
-        const nasUrl = renderNasUrl(template, { magnet, name, code });
-        window.open(nasUrl, '_blank', 'noopener,noreferrer');
+        GM_setValue(NAS_QBITTORRENT_URL_KEY, normalized.url);
+        GM_deleteValue('nas_url_template');
+        window.alert(`NAS qBittorrent 地址已保存：\n${normalized.url}`);
+        return normalized.url;
+    }
+
+    function requestQbittorrentAdd(baseUrl, magnet) {
+        const endpoint = `${baseUrl}/api/v2/torrents/add`;
+        const requestOrigin = new URL(baseUrl).origin;
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: endpoint,
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    'Origin': requestOrigin,
+                    'Referer': `${baseUrl}/`
+                },
+                data: new URLSearchParams({ urls: magnet }).toString(),
+                timeout: 15000,
+                onload: response => {
+                    const body = String(response.responseText || '').trim();
+                    if (response.status === 200 && /^Ok\.?$/i.test(body)) {
+                        resolve();
+                        return;
+                    }
+
+                    if ([401, 403].includes(response.status)) {
+                        reject(new Error('qBittorrent 拒绝访问，请先打开 WebUI 登录，或检查该地址的访问控制'));
+                        return;
+                    }
+                    if (response.status === 404) {
+                        reject(new Error('未找到 qBittorrent Web API，请检查 WebUI 地址或反向代理路径'));
+                        return;
+                    }
+                    if (response.status < 200 || response.status >= 300) {
+                        reject(new Error(`qBittorrent 返回 HTTP ${response.status || '未知状态'}`));
+                        return;
+                    }
+
+                    const detail = body.replace(/\s+/g, ' ').slice(0, 120);
+                    reject(new Error(detail ? `qBittorrent 添加失败：${detail}` : 'qBittorrent 未确认添加成功'));
+                },
+                onerror: () => reject(new Error('无法连接 NAS qBittorrent，请检查地址和网络')),
+                ontimeout: () => reject(new Error('连接 NAS qBittorrent 超时'))
+            });
+        });
+    }
+
+    async function addMagnetToNas(magnet) {
+        let configured = getNasQbittorrentUrl();
+        let normalized = normalizeNasQbittorrentUrl(configured);
+        if (!configured || normalized.error) {
+            if (configured && normalized.error) window.alert(`${normalized.error}，请重新设置`);
+            configured = configureNasQbittorrentUrl();
+            if (!configured) return false;
+            normalized = normalizeNasQbittorrentUrl(configured);
+        }
+
+        await requestQbittorrentAdd(normalized.url, magnet);
         return true;
     }
 
@@ -1282,7 +1310,7 @@
                 }
             });
 
-            GM_registerMenuCommand('设置一键 NAS 地址', configureNasUrlTemplate);
+            GM_registerMenuCommand('设置 NAS qBittorrent 地址', configureNasQbittorrentUrl);
             const previewSource = getPreviewSource();
             GM_registerMenuCommand(
                 `切换预览图来源（当前：${PREVIEW_SOURCES[previewSource].label}）`,
@@ -1952,7 +1980,6 @@
                             const magnetLink = $(trEle).find('a[href^="magnet:"]')[0];
                             if (!magnetLink) continue;
                             const magnetUrl = magnetLink.href;
-                            const taskName = $(trEle).find('td').first().text().trim() || AVID;
                             const cell = document.createElement('td');
                             cell.className = 'jt-magnet-actions-cell';
                             cell.style.textAlign = 'center';
@@ -1974,12 +2001,34 @@
                             nasLink.className = 'nong-nas';
                             nasLink.href = '#';
                             nasLink.textContent = '一键NAS';
-                            nasLink.title = '使用浏览器中保存的 NAS 地址模板打开此磁力链接';
-                            nasLink.addEventListener('click', function (e) {
+                            nasLink.title = '将此磁力链接添加到 NAS qBittorrent';
+                            nasLink.addEventListener('click', async function (e) {
                                 e.preventDefault();
-                                if (!openNasUrl({ magnet: magnetUrl, name: taskName, code: AVID })) return;
-                                $(this).text('已打开');
-                                setTimeout(() => $(this).text('一键NAS'), 1000);
+                                if (this.dataset.nasPending === '1') return;
+
+                                this.dataset.nasPending = '1';
+                                this.setAttribute('aria-disabled', 'true');
+                                this.style.pointerEvents = 'none';
+                                $(this).text('添加中…');
+                                try {
+                                    const added = await addMagnetToNas(magnetUrl);
+                                    if (!added) {
+                                        $(this).text('一键NAS');
+                                        return;
+                                    }
+                                    $(this).text('已添加');
+                                } catch (error) {
+                                    console.error('[JAV老司机] 一键 NAS 添加失败:', error);
+                                    $(this).text('添加失败');
+                                    window.alert(`添加到 NAS 失败：${error.message || error}`);
+                                } finally {
+                                    delete this.dataset.nasPending;
+                                    this.removeAttribute('aria-disabled');
+                                    this.style.pointerEvents = '';
+                                    setTimeout(() => {
+                                        if (this.dataset.nasPending !== '1') $(this).text('一键NAS');
+                                    }, 1500);
+                                }
                             });
 
                             actions.appendChild(copyLink);
