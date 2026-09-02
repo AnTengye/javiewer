@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      2.5.4
+// @version      2.7.0
 // @description  自动检索JavBus页面影视列表显示浏览状态，并集成原 JAV老司机 的瀑布流、排版优化及多站评分。
 // @author       Antengye
 // @include        *://*javbus.com/*
@@ -120,6 +120,7 @@
     }
 
     globalThis.__JAVBUS_TRACKER_GET_LARGE_PREVIEW_IMAGE_URL__ = getLargePreviewImageUrl;
+    globalThis.__JAVBUS_TRACKER_IS_PREVIEW_IMAGE_URL__ = isPreviewImageUrl;
     globalThis.__JAVBUS_TRACKER_RESOLVE_LARGE_PREVIEW_IMAGE_URL__ = resolveLargePreviewImageUrl;
 
     function createTrackOutbox({
@@ -1032,10 +1033,169 @@
 (function () {
     'use strict';
     const JAVDB_ITEM_SELECTOR = '.movie-list.v.cols-4.vcols-8 .item, .movie-list.v.cols-4.vcols-5 .item, .movie-list.h.cols-4.vcols-8 .item, .movie-list.h.cols-4.vcols-5 .item';
-    const JAVDB_DOMAIN = 'javdb368.com';
+    const JAVDB_DOMAIN = 'javdb.com';
     const MMTV_DOMAIN = '7mmtv.sx';
+    const NAS_URL_TEMPLATE_KEY = 'nas_url_template';
+    const PREVIEW_SOURCE_KEY = 'preview_image_source';
+    const JAVINFO_API_KEY_KEY = 'javinfo_api_key';
+    const JAVINFO_PREVIEW_CACHE_PREFIX = 'javinfo_preview_cache_';
+    const JAVINFO_PREVIEW_CACHE_TTL = 30 * 24 * 60 * 60 * 1000;
+    const PREVIEW_SOURCES = Object.freeze({
+        javdb: { label: 'JavDB', description: '免费，无需 API Key' },
+        javinfo: { label: 'javinfo API', description: '新账号 50 次免费，之后按次计费' }
+    });
     const getLargePreviewImageUrl = globalThis.__JAVBUS_TRACKER_GET_LARGE_PREVIEW_IMAGE_URL__ || ((url) => url);
+    const isPreviewImageUrl = globalThis.__JAVBUS_TRACKER_IS_PREVIEW_IMAGE_URL__ || ((url) => /\.(jpe?g|png|webp|avif|gif)(?=([?#].*)?$)/i.test(url));
     const resolveLargePreviewImageUrl = globalThis.__JAVBUS_TRACKER_RESOLVE_LARGE_PREVIEW_IMAGE_URL__ || ((imageUrl) => imageUrl);
+
+    function getPreviewSource() {
+        const configured = String(GM_getValue(PREVIEW_SOURCE_KEY, 'javdb') || '').toLowerCase();
+        return Object.prototype.hasOwnProperty.call(PREVIEW_SOURCES, configured) ? configured : 'javdb';
+    }
+
+    function getJavInfoApiKey() {
+        return String(GM_getValue(JAVINFO_API_KEY_KEY, '') || '').trim();
+    }
+
+    function configureJavInfoApiKey({ required = false } = {}) {
+        const current = getJavInfoApiKey();
+        const value = window.prompt(
+            '设置 javinfo API Key\n\n' +
+            `当前状态：${current ? '已配置' : '未配置'}\n` +
+            'Key 只会保存在当前浏览器的油猴脚本存储中，不会写入脚本代码。\n' +
+            '请输入新的 jvi_ Key；输入 CLEAR 可清除；取消或留空保持不变。',
+            ''
+        );
+        if (value === null || !value.trim()) {
+            if (required && !current) window.alert('切换到 javinfo 前需要先配置 API Key');
+            return current || null;
+        }
+
+        const normalized = value.trim();
+        if (normalized.toUpperCase() === 'CLEAR') {
+            GM_deleteValue(JAVINFO_API_KEY_KEY);
+            window.alert('已清除 javinfo API Key');
+            return '';
+        }
+        if (!/^jvi_\S+$/i.test(normalized)) {
+            window.alert('javinfo API Key 应以 jvi_ 开头，且不能包含空格');
+            return null;
+        }
+
+        GM_setValue(JAVINFO_API_KEY_KEY, normalized);
+        window.alert('javinfo API Key 已保存到当前浏览器');
+        return normalized;
+    }
+
+    function configurePreviewSource() {
+        const current = getPreviewSource();
+        const next = current === 'javdb' ? 'javinfo' : 'javdb';
+        const currentInfo = PREVIEW_SOURCES[current];
+        const nextInfo = PREVIEW_SOURCES[next];
+        const shouldSwitch = window.confirm(
+            `当前预览图来源：${currentInfo.label}（${currentInfo.description}）\n\n` +
+            `是否切换为：${nextInfo.label}（${nextInfo.description}）？`
+        );
+        if (!shouldSwitch) return;
+
+        if (next === 'javinfo' && !getJavInfoApiKey() && !configureJavInfoApiKey({ required: true })) {
+            return;
+        }
+
+        GM_setValue(PREVIEW_SOURCE_KEY, next);
+        window.alert(`预览图来源已切换为 ${nextInfo.label}`);
+        window.location.reload();
+    }
+
+    function getNasUrlTemplate() {
+        return String(GM_getValue(NAS_URL_TEMPLATE_KEY, '') || '').trim();
+    }
+
+    function renderNasUrl(template, { magnet, name, code }) {
+        const values = {
+            '{magnet}': encodeURIComponent(magnet),
+            '{magnetRaw}': magnet,
+            '{name}': encodeURIComponent(name),
+            '{nameRaw}': name,
+            '{code}': encodeURIComponent(code),
+            '{codeRaw}': code
+        };
+
+        return Object.entries(values).reduce(
+            (url, [variable, value]) => url.split(variable).join(value),
+            template
+        );
+    }
+
+    function validateNasUrlTemplate(template) {
+        if (!/\{magnet(?:Raw)?\}/.test(template)) {
+            return '地址模板必须包含 {magnet} 或 {magnetRaw}';
+        }
+
+        try {
+            const exampleUrl = renderNasUrl(template, {
+                magnet: 'magnet:?xt=urn:btih:example&dn=example',
+                name: 'example',
+                code: 'ABC-123'
+            });
+            const parsed = new URL(exampleUrl);
+            if (!['http:', 'https:'].includes(parsed.protocol)) {
+                return 'NAS 地址仅支持 http:// 或 https://';
+            }
+        } catch (error) {
+            return 'NAS 地址模板不是有效的网址';
+        }
+        return '';
+    }
+
+    function configureNasUrlTemplate() {
+        const current = getNasUrlTemplate();
+        const template = window.prompt(
+            '设置一键 NAS 地址模板\n\n' +
+            '可用变量：\n' +
+            '{magnet}  URL 编码后的磁力链接（推荐）\n' +
+            '{magnetRaw}  原始磁力链接\n' +
+            '{name} / {nameRaw}  任务名称\n' +
+            '{code} / {codeRaw}  当前番号\n\n' +
+            '示例：https://nas.example/add?url={magnet}&name={name}',
+            current
+        );
+        if (template === null) return null;
+
+        const normalized = template.trim();
+        if (!normalized) {
+            GM_setValue(NAS_URL_TEMPLATE_KEY, '');
+            window.alert('已清除一键 NAS 地址');
+            return '';
+        }
+
+        const error = validateNasUrlTemplate(normalized);
+        if (error) {
+            window.alert(error);
+            return null;
+        }
+
+        GM_setValue(NAS_URL_TEMPLATE_KEY, normalized);
+        window.alert('一键 NAS 地址已保存到当前浏览器');
+        return normalized;
+    }
+
+    function openNasUrl({ magnet, name, code }) {
+        let template = getNasUrlTemplate();
+        if (!template) template = configureNasUrlTemplate();
+        if (!template) return false;
+
+        const error = validateNasUrlTemplate(template);
+        if (error) {
+            window.alert(`${error}，请重新设置`);
+            template = configureNasUrlTemplate();
+            if (!template) return false;
+        }
+
+        const nasUrl = renderNasUrl(template, { magnet, name, code });
+        window.open(nasUrl, '_blank', 'noopener,noreferrer');
+        return true;
+    }
 
     // 瀑布流状态：1：开启、0：关闭
     let waterfallScrollStatus = GM_getValue('scroll_status', 1);
@@ -1102,7 +1262,8 @@
 
     class Common {
         static init() {
-            if (GM_getValue('javdb_url', undefined) === undefined) {
+            const currentJavDbUrl = GM_getValue('javdb_url', undefined);
+            if (currentJavDbUrl === undefined || /^(www\.)?javdb368\.com$/i.test(currentJavDbUrl)) {
                 GM_setValue('javdb_url', JAVDB_DOMAIN);
             }
             if (GM_getValue('javlib_url', undefined) === undefined) {
@@ -1120,6 +1281,17 @@
                     location.reload();
                 }
             });
+
+            GM_registerMenuCommand('设置一键 NAS 地址', configureNasUrlTemplate);
+            const previewSource = getPreviewSource();
+            GM_registerMenuCommand(
+                `切换预览图来源（当前：${PREVIEW_SOURCES[previewSource].label}）`,
+                configurePreviewSource
+            );
+            GM_registerMenuCommand(
+                `设置 javinfo API Key（${getJavInfoApiKey() ? '已配置' : '未配置'}）`,
+                () => configureJavInfoApiKey()
+            );
         }
 
         static parsetext(text) {
@@ -1134,7 +1306,7 @@
 
         static requestGM_XHR(details) {
             return new Promise((resolve, reject) => {
-                let req = GM_xmlhttpRequest({
+                GM_xmlhttpRequest({
                     method: details.method ? details.method : "GET",
                     url: details.url,
                     headers: details.headers,
@@ -1148,6 +1320,26 @@
                     }
                 });
             });
+        }
+
+        static getJavDbOrigin() {
+            const configured = String(GM_getValue('javdb_url', JAVDB_DOMAIN) || JAVDB_DOMAIN)
+                .trim()
+                .replace(/^https?:\/\//i, '')
+                .replace(/\/.*$/, '');
+            return `https://${configured || JAVDB_DOMAIN}`;
+        }
+
+        static absoluteUrl(value, baseUrl) {
+            try {
+                return new URL(value, baseUrl).href;
+            } catch (error) {
+                return '';
+            }
+        }
+
+        static normalizeJavDbCode(value) {
+            return String(value || '').toUpperCase().replace(/[\s_-]+/g, '');
         }
 
         static getAvCode(avid) {
@@ -1210,23 +1402,196 @@
         }
 
         static getJavDbData(avid) {
-            return new Promise((resolve, reject) => {
-                Common.requestGM_XHR({ url: "https://" + GM_getValue('javdb_url') + "/search?f=all&q=" + avid }).then((result) => {
-                    let doc = Common.parsetext(result.responseText);
-                    let a = $(doc).find(`.box .video-title:contains('${avid.toUpperCase()}')`);
-                    if (a.length) {
-                        let javdbData = {};
-                        javdbData.score = $(a[0].parentElement).find('.score>span').text();
-                        if (a[0].parentElement.href.indexOf("http") >= 0) {
-                            javdbData.url = a[0].parentElement.href.replace(location.origin, 'https://' + [GM_getValue('javdb_url')]);
-                        } else {
-                            javdbData.url = 'https://' + [GM_getValue('javdb_url')] + a[0].parentElement.href;
-                        }
-                        resolve(javdbData);
-                    } else {
-                        reject("javdb没查找到此番号");
-                    }
+            const origin = Common.getJavDbOrigin();
+            const searchUrl = new URL('/search', origin);
+            searchUrl.searchParams.set('f', 'all');
+            searchUrl.searchParams.set('q', avid);
+            const expectedCode = Common.normalizeJavDbCode(avid);
+
+            return Common.requestGM_XHR({ url: searchUrl.href }).then((result) => {
+                const doc = Common.parsetext(result.responseText);
+                const item = $(doc).find('.movie-list .item').toArray().find((element) => {
+                    const code = $(element).find('.video-title strong').first().text();
+                    return Common.normalizeJavDbCode(code) === expectedCode;
                 });
+                if (!item) throw new Error('JavDB 没查找到此番号');
+
+                const anchor = $(item).find('a.box')[0];
+                const href = anchor && anchor.getAttribute('href');
+                const url = Common.absoluteUrl(href, origin);
+                if (!url) throw new Error('JavDB 详情地址无效');
+
+                return {
+                    score: $(item).find('.score>span').text(),
+                    url
+                };
+            });
+        }
+
+        static getJavDbPreviewImages(javdbData) {
+            if (!javdbData || !javdbData.url) return Promise.resolve([]);
+
+            return Common.requestGM_XHR({ url: javdbData.url, timeout: 15000 }).then((result) => {
+                const doc = Common.parsetext(result.responseText);
+                const images = [];
+                const seen = new Set();
+
+                $(doc).find('.preview-images a.tile-item[href]').each((index, element) => {
+                    const large = Common.absoluteUrl(element.getAttribute('href'), javdbData.url);
+                    const image = element.querySelector('img');
+                    const thumbnail = Common.absoluteUrl(
+                        image && (image.getAttribute('src') || image.getAttribute('data-src')),
+                        javdbData.url
+                    );
+                    if (!isPreviewImageUrl(large) || seen.has(large)) return;
+                    seen.add(large);
+                    images.push({ large, thumbnail: isPreviewImageUrl(thumbnail) ? thumbnail : large });
+                });
+                return images;
+            });
+        }
+
+        static getJavInfoPreviewCacheKey(avid) {
+            return `${JAVINFO_PREVIEW_CACHE_PREFIX}${Common.normalizeJavDbCode(avid)}`;
+        }
+
+        static getJavInfoPreviewCache(avid) {
+            const key = Common.getJavInfoPreviewCacheKey(avid);
+            const cached = GM_getValue(key, null);
+            if (!cached || typeof cached !== 'object' || !Number.isFinite(cached.savedAt)) return null;
+            if (Date.now() - cached.savedAt > JAVINFO_PREVIEW_CACHE_TTL) {
+                GM_deleteValue(key);
+                return null;
+            }
+
+            return {
+                images: Common.normalizePreviewImages(cached.images),
+                provider: String(cached.provider || ''),
+                cached: true
+            };
+        }
+
+        static getPreviewImageValue(value, fields = []) {
+            if (typeof value === 'string') return value;
+            if (!value || typeof value !== 'object') return '';
+            for (const field of fields) {
+                if (typeof value[field] === 'string' && value[field]) return value[field];
+            }
+            return '';
+        }
+
+        static normalizePreviewImages(values, thumbnails = [], baseUrl = 'https://api.javinfo.dev/') {
+            const imageValues = Array.isArray(values) ? values : [];
+            const thumbnailValues = Array.isArray(thumbnails) ? thumbnails : [];
+            const images = [];
+            const seen = new Set();
+
+            imageValues.forEach((value, index) => {
+                const largeValue = Common.getPreviewImageValue(
+                    value,
+                    ['large', 'full', 'url', 'src', 'image']
+                );
+                const thumbnailValue = (typeof value === 'object' && Common.getPreviewImageValue(
+                    value,
+                    ['thumbnail', 'thumb', 'small', 'preview']
+                )) || Common.getPreviewImageValue(
+                    thumbnailValues[index],
+                    ['thumbnail', 'thumb', 'small', 'preview', 'url', 'src', 'image']
+                );
+                const large = Common.absoluteUrl(largeValue, baseUrl);
+                const thumbnail = Common.absoluteUrl(thumbnailValue, baseUrl);
+                if (!isPreviewImageUrl(large) || seen.has(large)) return;
+                seen.add(large);
+                images.push({
+                    large,
+                    thumbnail: isPreviewImageUrl(thumbnail) ? thumbnail : large
+                });
+            });
+            return images;
+        }
+
+        static getJavInfoImagesFromPayload(payload) {
+            const record = payload && payload.result;
+            if (!record || typeof record !== 'object') {
+                throw new Error('javinfo 返回了无效数据');
+            }
+            const extra = record.extra && typeof record.extra === 'object' ? record.extra : {};
+            const baseUrl = extra.pageUrl || extra.url || 'https://api.javinfo.dev/';
+            const groups = [
+                [record.galleryFull, record.galleryThumb],
+                [extra.galleryFull, extra.galleryThumb],
+                [record.sampleImages, record.sampleThumbs],
+                [extra.sampleImages, extra.sampleThumbs],
+                [record.gallery, record.thumbnails],
+                [extra.gallery, extra.thumbnails]
+            ];
+            const images = [];
+            const seen = new Set();
+
+            groups.forEach(([largeValues, thumbnailValues]) => {
+                Common.normalizePreviewImages(largeValues, thumbnailValues, baseUrl).forEach((image) => {
+                    if (seen.has(image.large)) return;
+                    seen.add(image.large);
+                    images.push(image);
+                });
+            });
+            return images;
+        }
+
+        static getJavInfoPreviewImages(avid) {
+            const cached = Common.getJavInfoPreviewCache(avid);
+            if (cached) return Promise.resolve(cached);
+
+            const apiKey = getJavInfoApiKey();
+            if (!apiKey) {
+                const error = new Error('尚未配置 javinfo API Key');
+                error.code = 'MISSING_API_KEY';
+                return Promise.reject(error);
+            }
+
+            const url = new URL('/movie', 'https://api.javinfo.dev');
+            url.searchParams.set('q', avid);
+            url.searchParams.set('providers', 'fanza,dmm,javdatabase,javlibrary');
+
+            return Common.requestGM_XHR({
+                url: url.href,
+                timeout: 20000,
+                headers: {
+                    Accept: 'application/json',
+                    'x-javinfo-key': apiKey
+                }
+            }).then((response) => {
+                let payload = null;
+                try {
+                    payload = JSON.parse(response.responseText || response.response || '');
+                } catch (error) {
+                    if (Number(response.status) === 200) throw new Error('javinfo 返回了无效 JSON');
+                }
+
+                const status = Number(response.status || 0);
+                if (status !== 200) {
+                    const error = new Error(payload && payload.message ? payload.message : `javinfo HTTP ${status || 'error'}`);
+                    error.status = status;
+                    throw error;
+                }
+
+                const returnedCode = payload && payload.result && payload.result.dvdId;
+                if (returnedCode && Common.normalizeJavDbCode(returnedCode) !== Common.normalizeJavDbCode(avid)) {
+                    throw new Error('javinfo 返回的番号与当前页面不一致');
+                }
+
+                const images = Common.getJavInfoImagesFromPayload(payload);
+                const result = {
+                    images,
+                    provider: String(payload.source || ''),
+                    cached: false
+                };
+                GM_setValue(Common.getJavInfoPreviewCacheKey(avid), {
+                    savedAt: Date.now(),
+                    provider: result.provider,
+                    images
+                });
+                return result;
             });
         }
     };
@@ -1277,14 +1642,153 @@
 
                 const sourceUrl = image.currentSrc || image.src || image.getAttribute('data-src');
                 const largeSrc = resolveLargePreviewImageUrl(sourceUrl, element.href);
-                if (!largeSrc || largeSrc === image.src) return;
+                if (!largeSrc) return;
 
                 element.href = largeSrc;
                 element.classList.add('jt-large-preview');
-                image.src = largeSrc;
-                image.removeAttribute('srcset');
-                image.removeAttribute('data-src');
+                image.loading = 'lazy';
+                image.decoding = 'async';
+                if (element.dataset.keepThumbnail === 'true') {
+                    const thumbnailSrc = element.dataset.thumbnail;
+                    if (isPreviewImageUrl(thumbnailSrc) && thumbnailSrc !== image.src) {
+                        image.src = thumbnailSrc;
+                    }
+                } else if (largeSrc !== image.src) {
+                    image.src = largeSrc;
+                    image.removeAttribute('srcset');
+                    image.removeAttribute('data-src');
+                }
             });
+        }
+
+        static ensureSamplePreviewContainer() {
+            const existing = document.getElementById('sample-waterfall');
+            if (existing) return existing;
+
+            const movieRow = document.querySelector('.container .row.movie');
+            const host = movieRow && movieRow.closest('.container');
+            if (!host) return null;
+
+            const heading = document.createElement('h4');
+            heading.className = 'jt-external-preview-heading';
+            heading.textContent = '样品图像';
+
+            const container = document.createElement('div');
+            container.id = 'sample-waterfall';
+
+            const magnetHeading = Array.from(host.children).find((element) =>
+                element.tagName === 'H4' && /磁力|magnet/i.test(element.textContent || '')
+            );
+            host.insertBefore(heading, magnetHeading || null);
+            host.insertBefore(container, magnetHeading || null);
+            return container;
+        }
+
+        static setPreviewStatus(message, state = '') {
+            let status = document.getElementById('jt-preview-status');
+            if (!message) {
+                if (status) status.remove();
+                return;
+            }
+
+            const container = this.ensureSamplePreviewContainer();
+            if (!container) return;
+            if (!status) {
+                status = document.createElement('p');
+                status.id = 'jt-preview-status';
+                container.parentNode.insertBefore(status, container);
+            }
+            status.className = state ? `jt-preview-status-${state}` : '';
+            status.textContent = message;
+        }
+
+        static getJavInfoPreviewError(error) {
+            if (error && error.code === 'MISSING_API_KEY') {
+                return ['尚未配置 javinfo API Key，请在油猴菜单中设置', 'error'];
+            }
+            const status = Number(error && error.status);
+            if (status === 401) return ['javinfo API Key 无效，请在油猴菜单中重新设置', 'error'];
+            if (status === 402) return ['javinfo 免费额度或账户余额已用完', 'error'];
+            if (status === 404) return ['javinfo 暂无可用预览图', 'empty'];
+            if (status === 429) return ['javinfo 请求过快，请稍后重试', 'error'];
+            return ['javinfo 预览图加载失败', 'error'];
+        }
+
+        static autoLoadPreviewImages(avid, javdbDataPromise) {
+            setTimeout(async () => {
+                if ($('#sample-waterfall>a').length > 0) {
+                    this.enhanceSamplePreviewImages();
+                    return;
+                }
+
+                const previewSource = getPreviewSource();
+                const sourceInfo = PREVIEW_SOURCES[previewSource];
+                this.setPreviewStatus(`正在从 ${sourceInfo.label} 查找预览图…`, 'loading');
+                try {
+                    let previewResult;
+                    if (previewSource === 'javinfo') {
+                        previewResult = await Common.getJavInfoPreviewImages(avid);
+                    } else {
+                        const javdbData = await javdbDataPromise;
+                        previewResult = {
+                            images: await Common.getJavDbPreviewImages(javdbData),
+                            provider: 'javdb',
+                            cached: false
+                        };
+                    }
+                    const previewImages = previewResult.images;
+
+                    if ($('#sample-waterfall>a').length > 0) {
+                        this.enhanceSamplePreviewImages();
+                        this.setPreviewStatus('');
+                        return;
+                    }
+                    if (previewImages.length === 0) {
+                        this.setPreviewStatus(`${sourceInfo.label} 暂无可用预览图`, 'empty');
+                        return;
+                    }
+
+                    const container = this.ensureSamplePreviewContainer();
+                    if (!container) return;
+                    previewImages.forEach(({ large, thumbnail }, index) => {
+                        const link = document.createElement('a');
+                        link.className = 'sample-box jt-external-preview';
+                        link.href = large;
+                        link.dataset.source = previewSource;
+                        link.dataset.keepThumbnail = 'true';
+                        link.dataset.thumbnail = thumbnail;
+
+                        const frame = document.createElement('div');
+                        frame.className = 'photo-frame';
+                        const image = document.createElement('img');
+                        image.src = thumbnail;
+                        image.alt = `${avid} ${sourceInfo.label} 预览图 ${index + 1}`;
+                        image.title = image.alt;
+                        image.loading = 'lazy';
+                        image.decoding = 'async';
+                        frame.appendChild(image);
+                        link.appendChild(frame);
+                        container.appendChild(link);
+                    });
+
+                    this.enhanceSamplePreviewImages();
+                    const provider = previewSource === 'javinfo' && previewResult.provider
+                        ? ` / ${previewResult.provider}`
+                        : '';
+                    const cached = previewResult.cached ? '（本地缓存）' : '';
+                    this.setPreviewStatus(
+                        `已从 ${sourceInfo.label}${provider} 自动补充 ${previewImages.length} 张预览图${cached}`,
+                        'success'
+                    );
+                } catch (error) {
+                    if (previewSource === 'javinfo') {
+                        const [message, state] = this.getJavInfoPreviewError(error);
+                        this.setPreviewStatus(message, state);
+                    } else {
+                        this.setPreviewStatus('JavDB 预览图加载失败', 'error');
+                    }
+                }
+            }, 800);
         }
 
         static collapseMagnetTable() {
@@ -1314,20 +1818,58 @@
                 GM_addStyle(`
                     .info p {line-height: 18px!important;}
                     .screencap img{	width:100%;	max-width: 1000px;}
+                    #sample-waterfall {
+                        display: grid !important;
+                        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                        align-items: start;
+                        gap: 8px;
+                        width: 100%;
+                        margin: 0 0 12px;
+                    }
                     #sample-waterfall .sample-box.jt-large-preview {
                         display: block !important;
                         width: 100% !important;
                         height: auto !important;
-                        margin: 0 0 14px 0 !important;
+                        margin: 0 !important;
+                        float: none !important;
+                        overflow: hidden;
+                        border-radius: 4px;
                     }
                     #sample-waterfall .sample-box.jt-large-preview .photo-frame {
-                        width: auto !important;
+                        width: 100% !important;
                         height: auto !important;
+                        line-height: 0;
                     }
                     #sample-waterfall .sample-box.jt-large-preview img {
                         width: 100% !important;
-                        max-width: 1000px !important;
+                        max-width: none !important;
                         height: auto !important;
+                        display: block;
+                        transition: transform .18s ease;
+                    }
+                    #sample-waterfall .sample-box.jt-large-preview:hover img {
+                        transform: scale(1.025);
+                    }
+                    #jt-preview-status {
+                        margin: -2px 0 8px;
+                        color: #777;
+                        font-size: 12px;
+                    }
+                    #jt-preview-status.jt-preview-status-success {color: #3c763d;}
+                    #jt-preview-status.jt-preview-status-error {color: #a94442;}
+                    .jt-magnet-actions {
+                        display: inline-flex;
+                        align-items: center;
+                        justify-content: center;
+                        gap: 8px;
+                        white-space: nowrap;
+                    }
+                    .jt-magnet-actions .nong-nas {font-weight: 600;}
+                    @media (max-width: 767px) {
+                        #sample-waterfall {
+                            grid-template-columns: repeat(2, minmax(0, 1fr));
+                            gap: 6px;
+                        }
                     }
                 `);
 
@@ -1367,7 +1909,8 @@
                         });
                     }
 
-                    Common.getJavDbData(AVID).then((javdbData) => {
+                    const javdbDataPromise = Common.getJavDbData(AVID);
+                    javdbDataPromise.then((javdbData) => {
                         let score = javdbData.score.trim().replace("由", "").replace("人評價", "人评");
                         $p_zuobiao.after(`
                             <p>
@@ -1376,6 +1919,7 @@
                             </p>
                         `);
                     }).catch(() => { });
+                    this.autoLoadPreviewImages(AVID, javdbDataPromise);
 
                     $('.col-md-3.info').append(`
                         <p>
@@ -1392,29 +1936,61 @@
                         </p>
                     `);
 
-                    // 简单增强磁力表格复制功能
-                    $('#magnet-table tbody tr').append('<td style="text-align:center;white-space:nowrap">操作</td>');
+                    // 增强磁力表格操作功能
+                    const $magnetHeader = $('#magnet-table tbody tr').first();
+                    if ($magnetHeader.length && !$magnetHeader.find('.jt-magnet-actions-heading').length) {
+                        $magnetHeader.append('<td class="jt-magnet-actions-heading" style="text-align:center;white-space:nowrap">操作</td>');
+                    }
                     this.collapseMagnetTable();
 
                     const enhanceMagnetTable = () => {
                         let tr_array = $('#magnet-table tr[height="35px"]');
                         for (var i = 0; i < tr_array.length; i++) {
                             let trEle = tr_array[i];
-                            if ($(trEle).find('.nong-copy').length > 0) continue; // 已处理过
-                            let magnetUrl = $(trEle).find("td a")[0].href;
-                            $(trEle).append("<td style='text-align:center;'><div><a class='nong-copy' href='" + magnetUrl + "'>复制</a></div></td>");
-                            $(trEle).find(".nong-copy").click(function (e) {
+                            if ($(trEle).find('.jt-magnet-actions-cell').length > 0) continue;
+
+                            const magnetLink = $(trEle).find('a[href^="magnet:"]')[0];
+                            if (!magnetLink) continue;
+                            const magnetUrl = magnetLink.href;
+                            const taskName = $(trEle).find('td').first().text().trim() || AVID;
+                            const cell = document.createElement('td');
+                            cell.className = 'jt-magnet-actions-cell';
+                            cell.style.textAlign = 'center';
+
+                            const actions = document.createElement('div');
+                            actions.className = 'jt-magnet-actions';
+                            const copyLink = document.createElement('a');
+                            copyLink.className = 'nong-copy';
+                            copyLink.href = magnetUrl;
+                            copyLink.textContent = '复制';
+                            copyLink.addEventListener('click', function (e) {
                                 e.preventDefault();
-                                GM_setClipboard($(this).attr('href'));
+                                GM_setClipboard(magnetUrl);
                                 $(this).text("成功");
                                 setTimeout(() => $(this).text("复制"), 1000);
                             });
+
+                            const nasLink = document.createElement('a');
+                            nasLink.className = 'nong-nas';
+                            nasLink.href = '#';
+                            nasLink.textContent = '一键NAS';
+                            nasLink.title = '使用浏览器中保存的 NAS 地址模板打开此磁力链接';
+                            nasLink.addEventListener('click', function (e) {
+                                e.preventDefault();
+                                if (!openNasUrl({ magnet: magnetUrl, name: taskName, code: AVID })) return;
+                                $(this).text('已打开');
+                                setTimeout(() => $(this).text('一键NAS'), 1000);
+                            });
+
+                            actions.appendChild(copyLink);
+                            actions.appendChild(nasLink);
+                            cell.appendChild(actions);
+                            trEle.appendChild(cell);
                         }
                     };
 
                     enhanceMagnetTable();
-                    const observer = new MutationObserver((mutationsList, observer) => {
-                        observer.disconnect();
+                    const observer = new MutationObserver(() => {
                         enhanceMagnetTable();
                     });
                     const targetNode = document.getElementById('magnet-table');
