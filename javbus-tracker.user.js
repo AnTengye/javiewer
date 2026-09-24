@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      2.8.0
+// @version      2.8.1
 // @description  自动检索JavBus页面影视列表显示浏览状态，并集成原 JAV老司机 的瀑布流、排版优化及多站评分。
 // @author       Antengye
 // @include        *://*javbus.com/*
@@ -345,6 +345,17 @@
             background: rgba(17, 153, 142, 0.15) !important;
         }
 
+        .jt-item-vr {
+            filter: grayscale(1);
+            opacity: 0.55;
+            transition: opacity .18s ease;
+        }
+
+        .jt-item-vr:hover,
+        .jt-item-vr:focus-within {
+            opacity: 0.85;
+        }
+
         /* 详情页样式 */
         .jt-detail-info {
             margin: 10px 0;
@@ -662,6 +673,22 @@
         return items;
     }
 
+    function markVrMovieItems() {
+        const cards = new Set();
+        document.querySelectorAll('#waterfall .item, .movie-box').forEach((element) => {
+            cards.add(element.closest('.item') || element);
+        });
+
+        for (const card of cards) {
+            const titles = [
+                card.querySelector('.photo-info > span')?.textContent,
+                card.querySelector('.video-title')?.textContent,
+                card.querySelector('a.movie-box img[title]')?.title
+            ];
+            card.classList.toggle('jt-item-vr', titles.some((text) => /【\s*VR\s*】/i.test(text || '')));
+        }
+    }
+
     /**
      * 获取当前详情页的番号
      */
@@ -875,6 +902,7 @@
      * 扫描页面并处理新项目
      */
     function scanAndProcess() {
+        markVrMovieItems();
         const movieItems = getMovieItems();
         collectPendingMovieCodes(movieItems, processedCodes, pendingCodes);
 
@@ -1848,10 +1876,12 @@
                     .screencap img{	width:100%;	max-width: 1000px;}
                     #sample-waterfall {
                         display: grid !important;
-                        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                        grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
                         align-items: start;
                         gap: 8px;
                         width: 100%;
+                        /* 5 列 × 220px + 4 个 8px 间距 */
+                        max-width: 1132px;
                         margin: 0 0 12px;
                     }
                     #sample-waterfall .sample-box.jt-large-preview {
@@ -1893,12 +1923,6 @@
                         white-space: nowrap;
                     }
                     .jt-magnet-actions .nong-nas {font-weight: 600;}
-                    @media (max-width: 767px) {
-                        #sample-waterfall {
-                            grid-template-columns: repeat(2, minmax(0, 1fr));
-                            gap: 6px;
-                        }
-                    }
                 `);
 
                 $('#navbar ul.nav.navbar-nav li:eq(0)').after(`<li><a href="https://onejav.com/popular/?amateur=1" target="_blank" style="color: red;">FC2</a></li>`);
