@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      2.8.2
+// @version      2.8.3
 // @description  自动检索JavBus页面影视列表显示浏览状态，并集成原 JAV老司机 的瀑布流、排版优化及多站评分。
 // @author       Antengye
 // @include        *://*javbus.com/*
@@ -119,9 +119,56 @@
         return getLargePreviewImageUrl(imageUrl);
     }
 
+    function planPreviewRows(ratios, width, gap = 8) {
+        if (!Number.isFinite(width) || width <= 0 || !ratios.length) return [];
+
+        const normalized = ratios.map((ratio) => Number.isFinite(ratio) && ratio > 0 ? ratio : 16 / 9);
+        const rows = [];
+        const targetHeight = 320;
+        const minImageWidth = Math.min(260, width);
+
+        for (let start = 0; start < normalized.length;) {
+            let bestCount = 1;
+            let bestScore = Infinity;
+            let ratioSum = 0;
+
+            for (let count = 1; count <= Math.min(5, normalized.length - start); count++) {
+                ratioSum += normalized[start + count - 1];
+                const available = width - gap * (count - 1);
+                if (available <= 0) break;
+
+                const height = available / ratioSum;
+                const rowRatios = normalized.slice(start, start + count);
+                const maxHeight = rowRatios.every((ratio) => ratio < 1) ? 600 : 450;
+                const displayHeight = Math.min(height, maxHeight);
+                const tooNarrow = rowRatios.some((ratio) => ratio * displayHeight < minImageWidth);
+                const score = Math.abs(Math.log(height / targetHeight)) + (tooNarrow ? 1 : 0);
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestCount = count;
+                }
+            }
+
+            const rowRatios = normalized.slice(start, start + bestCount);
+            const available = width - gap * (bestCount - 1);
+            const idealHeight = available / rowRatios.reduce((sum, ratio) => sum + ratio, 0);
+            const maxHeight = rowRatios.every((ratio) => ratio < 1) ? 600 : 450;
+            const height = Math.min(idealHeight, maxHeight);
+            const widths = rowRatios.map((ratio) => Math.floor(ratio * height));
+            if (height === idealHeight) {
+                widths[widths.length - 1] += Math.round(available - widths.reduce((sum, itemWidth) => sum + itemWidth, 0));
+            }
+            rows.push({ start, widths, height });
+            start += bestCount;
+        }
+
+        return rows;
+    }
+
     globalThis.__JAVBUS_TRACKER_GET_LARGE_PREVIEW_IMAGE_URL__ = getLargePreviewImageUrl;
     globalThis.__JAVBUS_TRACKER_IS_PREVIEW_IMAGE_URL__ = isPreviewImageUrl;
     globalThis.__JAVBUS_TRACKER_RESOLVE_LARGE_PREVIEW_IMAGE_URL__ = resolveLargePreviewImageUrl;
+    globalThis.__JAVBUS_TRACKER_PLAN_PREVIEW_ROWS__ = planPreviewRows;
 
     function createTrackOutbox({
         storage,
@@ -1042,7 +1089,8 @@
             getMovieItems,
             getLargePreviewImageUrl,
             isPreviewImageUrl,
-            resolveLargePreviewImageUrl
+            resolveLargePreviewImageUrl,
+            planPreviewRows
         };
         return;
     }
@@ -1075,6 +1123,7 @@
     const getLargePreviewImageUrl = globalThis.__JAVBUS_TRACKER_GET_LARGE_PREVIEW_IMAGE_URL__ || ((url) => url);
     const isPreviewImageUrl = globalThis.__JAVBUS_TRACKER_IS_PREVIEW_IMAGE_URL__ || ((url) => /\.(jpe?g|png|webp|avif|gif)(?=([?#].*)?$)/i.test(url));
     const resolveLargePreviewImageUrl = globalThis.__JAVBUS_TRACKER_RESOLVE_LARGE_PREVIEW_IMAGE_URL__ || ((imageUrl) => imageUrl);
+    const planPreviewRows = globalThis.__JAVBUS_TRACKER_PLAN_PREVIEW_ROWS__;
 
     function getPreviewSource() {
         const configured = String(GM_getValue(PREVIEW_SOURCE_KEY, 'javdb') || '').toLowerCase();
@@ -1704,6 +1753,10 @@
                 element.classList.add('jt-large-preview');
                 image.loading = 'lazy';
                 image.decoding = 'async';
+                if (!image._jtPreviewLayoutObserved) {
+                    image.addEventListener('load', () => this.scheduleSamplePreviewLayout());
+                    image._jtPreviewLayoutObserved = true;
+                }
                 const thumbnailSrc = element.dataset.thumbnail || sourceUrl;
                 if (isPreviewImageUrl(thumbnailSrc) && thumbnailSrc !== largeSrc) {
                     element.dataset.thumbnail = thumbnailSrc;
@@ -1719,6 +1772,47 @@
                     image.src = largeSrc;
                 }
             });
+            this.observeSamplePreviewLayout();
+        }
+
+        static scheduleSamplePreviewLayout() {
+            const container = document.getElementById('sample-waterfall');
+            if (!container || container._jtPreviewLayoutFrame) return;
+            container._jtPreviewLayoutFrame = requestAnimationFrame(() => {
+                container._jtPreviewLayoutFrame = null;
+                const items = Array.from(container.querySelectorAll(':scope > a.jt-large-preview'));
+                if (!items.length || !container.clientWidth) return;
+
+                const ratios = items.map((item) => {
+                    const image = item.querySelector('img');
+                    return image && image.complete && image.naturalHeight
+                        ? image.naturalWidth / image.naturalHeight
+                        : 16 / 9;
+                });
+                planPreviewRows(ratios, container.clientWidth).forEach(({ start, widths }) => {
+                    widths.forEach((width, index) => {
+                        items[start + index].style.setProperty('--jt-preview-width', `${width}px`);
+                    });
+                });
+                container.classList.add('jt-preview-measured');
+            });
+        }
+
+        static observeSamplePreviewLayout() {
+            const container = document.getElementById('sample-waterfall');
+            if (!container) return;
+            if (!container._jtPreviewResizeObserver && typeof ResizeObserver !== 'undefined') {
+                let previousWidth = container.clientWidth;
+                container._jtPreviewResizeObserver = new ResizeObserver(() => {
+                    const width = container.clientWidth;
+                    if (width !== previousWidth) {
+                        previousWidth = width;
+                        this.scheduleSamplePreviewLayout();
+                    }
+                });
+                container._jtPreviewResizeObserver.observe(container);
+            }
+            this.scheduleSamplePreviewLayout();
         }
 
         static ensureSamplePreviewContainer() {
@@ -1889,28 +1983,33 @@
                     }
                     #sample-waterfall .sample-box.jt-large-preview {
                         display: block !important;
-                        flex: 0 1 auto;
-                        min-width: min(100%, max(280px, calc((100% - 32px) / 5)));
-                        max-width: min(100%, 460px);
-                        width: fit-content !important;
+                        box-sizing: border-box;
+                        flex: 1 1 max(280px, calc((100% - 32px) / 5));
+                        min-width: 0;
+                        max-width: 100%;
+                        width: auto !important;
                         height: auto !important;
                         margin: 0 !important;
                         float: none !important;
                         overflow: hidden;
                         border-radius: 4px;
                     }
+                    #sample-waterfall.jt-preview-measured .sample-box.jt-large-preview {
+                        flex: 0 0 var(--jt-preview-width);
+                        width: var(--jt-preview-width) !important;
+                    }
                     #sample-waterfall .sample-box.jt-large-preview .photo-frame {
                         display: flex;
                         justify-content: center;
                         width: 100% !important;
                         height: auto !important;
+                        margin: 0 !important;
                         line-height: 0;
                     }
                     #sample-waterfall .sample-box.jt-large-preview img {
-                        width: auto !important;
+                        width: 100% !important;
                         max-width: 100% !important;
                         height: auto !important;
-                        max-height: 400px;
                         display: block;
                         transition: transform .18s ease;
                     }
