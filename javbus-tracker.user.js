@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      2.8.1
+// @version      2.8.2
 // @description  自动检索JavBus页面影视列表显示浏览状态，并集成原 JAV老司机 的瀑布流、排版优化及多站评分。
 // @author       Antengye
 // @include        *://*javbus.com/*
@@ -1704,15 +1704,19 @@
                 element.classList.add('jt-large-preview');
                 image.loading = 'lazy';
                 image.decoding = 'async';
-                if (element.dataset.keepThumbnail === 'true') {
-                    const thumbnailSrc = element.dataset.thumbnail;
-                    if (isPreviewImageUrl(thumbnailSrc) && thumbnailSrc !== image.src) {
+                const thumbnailSrc = element.dataset.thumbnail || sourceUrl;
+                if (isPreviewImageUrl(thumbnailSrc) && thumbnailSrc !== largeSrc) {
+                    element.dataset.thumbnail = thumbnailSrc;
+                    image.onerror = () => {
+                        image.onerror = null;
+                        image.dataset.largePreviewFailed = largeSrc;
                         image.src = thumbnailSrc;
-                    }
-                } else if (largeSrc !== image.src) {
-                    image.src = largeSrc;
+                    };
+                }
+                if (image.dataset.largePreviewFailed !== largeSrc && largeSrc !== image.src) {
                     image.removeAttribute('srcset');
                     image.removeAttribute('data-src');
+                    image.src = largeSrc;
                 }
             });
         }
@@ -1811,7 +1815,6 @@
                         link.className = 'sample-box jt-external-preview';
                         link.href = large;
                         link.dataset.source = previewSource;
-                        link.dataset.keepThumbnail = 'true';
                         link.dataset.thumbnail = thumbnail;
 
                         const frame = document.createElement('div');
@@ -1875,18 +1878,21 @@
                     .info p {line-height: 18px!important;}
                     .screencap img{	width:100%;	max-width: 1000px;}
                     #sample-waterfall {
-                        display: grid !important;
-                        grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
-                        align-items: start;
+                        display: flex !important;
+                        flex-wrap: wrap;
+                        align-items: flex-start;
                         gap: 8px;
                         width: 100%;
-                        /* 5 列 × 220px + 4 个 8px 间距 */
-                        max-width: 1132px;
+                        /* 卡片最小宽度按五列计算，宽图和竖图仍可采用不同宽度 */
+                        max-width: 1832px;
                         margin: 0 0 12px;
                     }
                     #sample-waterfall .sample-box.jt-large-preview {
                         display: block !important;
-                        width: 100% !important;
+                        flex: 0 1 auto;
+                        min-width: min(100%, max(280px, calc((100% - 32px) / 5)));
+                        max-width: min(100%, 460px);
+                        width: fit-content !important;
                         height: auto !important;
                         margin: 0 !important;
                         float: none !important;
@@ -1894,14 +1900,17 @@
                         border-radius: 4px;
                     }
                     #sample-waterfall .sample-box.jt-large-preview .photo-frame {
+                        display: flex;
+                        justify-content: center;
                         width: 100% !important;
                         height: auto !important;
                         line-height: 0;
                     }
                     #sample-waterfall .sample-box.jt-large-preview img {
-                        width: 100% !important;
-                        max-width: none !important;
+                        width: auto !important;
+                        max-width: 100% !important;
                         height: auto !important;
+                        max-height: 400px;
                         display: block;
                         transition: transform .18s ease;
                     }
