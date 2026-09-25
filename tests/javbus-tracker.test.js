@@ -345,7 +345,7 @@ test('preview image URLs are upgraded from DMM thumbnails to large images', () =
 
 test('REBD-1067 previews fill each row with readable 16:9 images', () => {
     const { planPreviewRows } = loadTracker();
-    const rows = planPreviewRows(Array(20).fill(800 / 450), 1140);
+    const rows = planPreviewRows(Array.from({ length: 20 }, () => ({ width: 800, height: 450 })), 1140);
 
     assert.equal(rows.length, 10);
     for (const row of rows) {
@@ -354,21 +354,37 @@ test('REBD-1067 previews fill each row with readable 16:9 images', () => {
     }
 });
 
-test('preview rows preserve mixed aspect ratios and never exceed five images', () => {
+test('five small originals enlarge proportionally to fill a row', () => {
     const { planPreviewRows } = loadTracker();
-    const ratios = [16 / 9, 2 / 3, 4 / 3, 1 / 2, 16 / 9, 2 / 3, 2 / 3, 2 / 3];
-    const rows = planPreviewRows(ratios, 1140);
+    const sizes = [120, 150, 180, 120, 150].map((width) => ({ width, height: 90 }));
+    const rows = planPreviewRows(sizes, 1140);
 
-    assert.equal(rows.reduce((count, row) => count + row.widths.length, 0), ratios.length);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].widths.length, 5);
+    assert.ok(rows[0].scale > 1);
+    assert.equal(rows[0].widths.reduce((sum, width) => sum + width, 0) + 32, 1140);
+    for (let i = 0; i < sizes.length; i++) {
+        assert.ok(Math.abs(rows[0].widths[i] / sizes[i].width - rows[0].scale) < 0.01);
+    }
+});
+
+test('preview rows preserve different original sizes without making images tiny', () => {
+    const { planPreviewRows } = loadTracker();
+    const sizes = [
+        { width: 800, height: 450 },
+        { width: 120, height: 90 },
+        { width: 120, height: 90 },
+        { width: 120, height: 90 },
+        { width: 120, height: 90 }
+    ];
+    const rows = planPreviewRows(sizes, 1140);
+
+    assert.equal(rows.reduce((count, row) => count + row.widths.length, 0), sizes.length);
     for (const row of rows) {
         assert.ok(row.widths.length <= 5);
         assert.ok(row.widths.every((width) => width > 0));
-        assert.ok(row.widths.reduce((sum, width) => sum + width, 0) + 8 * (row.widths.length - 1) <= 1140);
-        for (let i = 1; i < row.widths.length; i++) {
-            const firstRatio = ratios[row.start];
-            const nextRatio = ratios[row.start + i];
-            assert.ok(Math.abs(row.widths[i] / row.widths[0] - nextRatio / firstRatio) < 0.02);
-        }
+        assert.equal(row.widths.reduce((sum, width) => sum + width, 0) + 8 * (row.widths.length - 1), 1140);
+        assert.ok(row.widths.every((width) => width >= 220));
     }
-    assert.equal(planPreviewRows([16 / 9, 2 / 3], 370).length, 2);
+    assert.equal(planPreviewRows(sizes.slice(0, 2), 370).length, 2);
 });

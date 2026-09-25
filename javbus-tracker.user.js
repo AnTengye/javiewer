@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      2.8.3
+// @version      2.8.4
 // @description  自动检索JavBus页面影视列表显示浏览状态，并集成原 JAV老司机 的瀑布流、排版优化及多站评分。
 // @author       Antengye
 // @include        *://*javbus.com/*
@@ -119,49 +119,65 @@
         return getLargePreviewImageUrl(imageUrl);
     }
 
-    function planPreviewRows(ratios, width, gap = 8) {
-        if (!Number.isFinite(width) || width <= 0 || !ratios.length) return [];
+    function planPreviewRows(sizes, width, gap = 8) {
+        if (!Number.isFinite(width) || width <= 0 || !sizes.length) return [];
 
-        const normalized = ratios.map((ratio) => Number.isFinite(ratio) && ratio > 0 ? ratio : 16 / 9);
-        const rows = [];
-        const targetHeight = 320;
-        const minImageWidth = Math.min(260, width);
+        const imageWidths = sizes.map(({ width: imageWidth }) =>
+            Number.isFinite(imageWidth) && imageWidth > 0 ? imageWidth : 800
+        );
+        const rowCounts = [];
+        const minimumScale = 0.55;
+        const minimumWidth = Math.min(220, width);
 
-        for (let start = 0; start < normalized.length;) {
-            let bestCount = 1;
-            let bestScore = Infinity;
-            let ratioSum = 0;
-
-            for (let count = 1; count <= Math.min(5, normalized.length - start); count++) {
-                ratioSum += normalized[start + count - 1];
-                const available = width - gap * (count - 1);
-                if (available <= 0) break;
-
-                const height = available / ratioSum;
-                const rowRatios = normalized.slice(start, start + count);
-                const maxHeight = rowRatios.every((ratio) => ratio < 1) ? 600 : 450;
-                const displayHeight = Math.min(height, maxHeight);
-                const tooNarrow = rowRatios.some((ratio) => ratio * displayHeight < minImageWidth);
-                const score = Math.abs(Math.log(height / targetHeight)) + (tooNarrow ? 1 : 0);
-                if (score < bestScore) {
-                    bestScore = score;
-                    bestCount = count;
-                }
+        for (let start = 0; start < imageWidths.length;) {
+            const fiveNaturalWidth = imageWidths.slice(start, start + 5)
+                .reduce((sum, imageWidth) => sum + imageWidth, 0);
+            if (start + 5 <= imageWidths.length && fiveNaturalWidth + gap * 4 <= width) {
+                rowCounts.push(5);
+                start += 5;
+                continue;
             }
 
-            const rowRatios = normalized.slice(start, start + bestCount);
-            const available = width - gap * (bestCount - 1);
-            const idealHeight = available / rowRatios.reduce((sum, ratio) => sum + ratio, 0);
-            const maxHeight = rowRatios.every((ratio) => ratio < 1) ? 600 : 450;
-            const height = Math.min(idealHeight, maxHeight);
-            const widths = rowRatios.map((ratio) => Math.floor(ratio * height));
-            if (height === idealHeight) {
-                widths[widths.length - 1] += Math.round(available - widths.reduce((sum, itemWidth) => sum + itemWidth, 0));
+            let count = 1;
+            let naturalWidth = imageWidths[start];
+            while (count < 5 && start + count < imageWidths.length) {
+                const nextWidth = naturalWidth + imageWidths[start + count];
+                const available = width - gap * count;
+                const scale = available / nextWidth;
+                if (available <= 0 || scale < minimumScale
+                    || imageWidths.slice(start, start + count + 1)
+                        .some((imageWidth) => imageWidth * scale < minimumWidth)) break;
+                naturalWidth = nextWidth;
+                count++;
             }
-            rows.push({ start, widths, height });
-            start += bestCount;
+            rowCounts.push(count);
+            start += count;
         }
 
+        // 避免末尾单张被放得过大，同时保持每行最多五张。
+        if (rowCounts.length > 1 && rowCounts[rowCounts.length - 1] === 1
+            && rowCounts[rowCounts.length - 2] >= 3) {
+            rowCounts[rowCounts.length - 2]--;
+            rowCounts[rowCounts.length - 1]++;
+        }
+
+        const rows = [];
+        let start = 0;
+        for (const count of rowCounts) {
+            const available = width - gap * (count - 1);
+            const rowWidths = imageWidths.slice(start, start + count);
+            const scale = available / rowWidths.reduce((sum, imageWidth) => sum + imageWidth, 0);
+            const exactWidths = rowWidths.map((imageWidth) => imageWidth * scale);
+            const widths = exactWidths.map(Math.floor);
+            const remainder = Math.round(available - widths.reduce((sum, itemWidth) => sum + itemWidth, 0));
+            const roundingOrder = exactWidths.map((exactWidth, index) => ({
+                index,
+                fraction: exactWidth - widths[index]
+            })).sort((left, right) => right.fraction - left.fraction);
+            for (let i = 0; i < remainder; i++) widths[roundingOrder[i].index]++;
+            rows.push({ start, widths, scale });
+            start += count;
+        }
         return rows;
     }
 
@@ -1783,13 +1799,13 @@
                 const items = Array.from(container.querySelectorAll(':scope > a.jt-large-preview'));
                 if (!items.length || !container.clientWidth) return;
 
-                const ratios = items.map((item) => {
+                const sizes = items.map((item) => {
                     const image = item.querySelector('img');
-                    return image && image.complete && image.naturalHeight
-                        ? image.naturalWidth / image.naturalHeight
-                        : 16 / 9;
+                    return image && image.complete && image.naturalWidth
+                        ? { width: image.naturalWidth, height: image.naturalHeight }
+                        : { width: 800, height: 450 };
                 });
-                planPreviewRows(ratios, container.clientWidth).forEach(({ start, widths }) => {
+                planPreviewRows(sizes, container.clientWidth).forEach(({ start, widths }) => {
                     widths.forEach((width, index) => {
                         items[start + index].style.setProperty('--jt-preview-width', `${width}px`);
                     });
