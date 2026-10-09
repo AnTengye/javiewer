@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavBus 影视追踪助手
 // @namespace    http://tampermonkey.net/
-// @version      2.8.4
+// @version      2.8.5
 // @description  自动检索JavBus页面影视列表显示浏览状态，并集成原 JAV老司机 的瀑布流、排版优化及多站评分。
 // @author       Antengye
 // @include        *://*javbus.com/*
@@ -1128,6 +1128,7 @@
     const JAVDB_DOMAIN = 'javdb.com';
     const MMTV_DOMAIN = '7mmtv.sx';
     const NAS_QBITTORRENT_URL_KEY = 'nas_qbittorrent_url';
+    const NAS_TORRENT_FILTER_TAG = 'filter-small';
     const PREVIEW_SOURCE_KEY = 'preview_image_source';
     const JAVINFO_API_KEY_KEY = 'javinfo_api_key';
     const JAVINFO_PREVIEW_CACHE_PREFIX = 'javinfo_preview_cache_';
@@ -1236,6 +1237,7 @@
         const value = window.prompt(
             '设置 NAS qBittorrent WebUI 地址\n\n' +
             '一键 NAS 会直接调用 qBittorrent Web API 添加磁力链接。\n' +
+            '添加后由 NAS 后台按配置大小过滤，浏览器无需等待元数据。\n' +
             '地址只保存在当前浏览器的油猴脚本存储中。\n\n' +
             '示例：http://nas.example:8080',
             current
@@ -1261,27 +1263,20 @@
         return normalized.url;
     }
 
-    function requestQbittorrentAdd(baseUrl, magnet) {
-        const endpoint = `${baseUrl}/api/v2/torrents/add`;
+    function requestQbittorrent(baseUrl, apiPath, data = null) {
         const requestOrigin = new URL(baseUrl).origin;
+        const headers = { Origin: requestOrigin, Referer: `${baseUrl}/` };
+        if (data !== null) {
+            headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
+        }
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
-                method: 'POST',
-                url: endpoint,
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                    'Origin': requestOrigin,
-                    'Referer': `${baseUrl}/`
-                },
-                data: new URLSearchParams({ urls: magnet }).toString(),
+                method: data === null ? 'GET' : 'POST',
+                url: `${baseUrl}/api/v2/${apiPath}`,
+                headers,
+                data: data === null ? undefined : new URLSearchParams(data).toString(),
                 timeout: 15000,
                 onload: response => {
-                    const body = String(response.responseText || '').trim();
-                    if (response.status === 200 && /^Ok\.?$/i.test(body)) {
-                        resolve();
-                        return;
-                    }
-
                     if ([401, 403].includes(response.status)) {
                         reject(new Error('qBittorrent 拒绝访问，请先打开 WebUI 登录，或检查该地址的访问控制'));
                         return;
@@ -1295,13 +1290,38 @@
                         return;
                     }
 
-                    const detail = body.replace(/\s+/g, ' ').slice(0, 120);
-                    reject(new Error(detail ? `qBittorrent 添加失败：${detail}` : 'qBittorrent 未确认添加成功'));
+                    resolve(String(response.responseText || '').trim());
                 },
                 onerror: () => reject(new Error('无法连接 NAS qBittorrent，请检查地址和网络')),
                 ontimeout: () => reject(new Error('连接 NAS qBittorrent 超时'))
             });
         });
+    }
+
+    async function requestQbittorrentAdd(baseUrl, magnet) {
+        const version = await requestQbittorrent(baseUrl, 'app/version');
+        const match = /^v?(\d+)\.(\d+)(?:\.\d+)*(?:[a-z][\w.-]*)?$/i.exec(version);
+        if (!match) {
+            throw new Error('qBittorrent 返回了无效版本号，请检查 WebUI 登录状态和地址');
+        }
+        const major = Number(match[1]);
+        const minor = Number(match[2]);
+        if ((major !== 4 && major !== 5) || (major === 4 && minor < 5)) {
+            throw new Error('NAS 后台过滤需要 qBittorrent 4.5+ 或 5.x');
+        }
+
+        // 标签必须与 qbit-upload 的 torrent_filter.tag 配置一致。
+        const data = {
+            urls: magnet,
+            tags: NAS_TORRENT_FILTER_TAG,
+            stopCondition: 'MetadataReceived',
+            [major === 4 ? 'paused' : 'stopped']: 'false'
+        };
+        const body = await requestQbittorrent(baseUrl, 'torrents/add', data);
+        if (/^Ok\.?$/i.test(body)) return;
+
+        const detail = body.replace(/\s+/g, ' ').slice(0, 120);
+        throw new Error(detail ? `qBittorrent 添加失败：${detail}` : 'qBittorrent 未确认添加成功');
     }
 
     async function addMagnetToNas(magnet) {
@@ -1316,6 +1336,15 @@
 
         await requestQbittorrentAdd(normalized.url, magnet);
         return true;
+    }
+
+    if (globalThis.__JAVBUS_TRACKER_TEST_MODE__) {
+        globalThis.__JAVBUS_TRACKER_NAS_TEST_EXPORTS__ = {
+            normalizeNasQbittorrentUrl,
+            requestQbittorrentAdd,
+            addMagnetToNas
+        };
+        return;
     }
 
     // 瀑布流状态：1：开启、0：关闭
@@ -2149,7 +2178,7 @@
                             nasLink.className = 'nong-nas';
                             nasLink.href = '#';
                             nasLink.textContent = '一键NAS';
-                            nasLink.title = '将此磁力链接添加到 NAS qBittorrent';
+                            nasLink.title = '提交到 NAS，获取元数据后由后台按配置大小过滤';
                             nasLink.addEventListener('click', async function (e) {
                                 e.preventDefault();
                                 if (this.dataset.nasPending === '1') return;
@@ -2164,7 +2193,7 @@
                                         $(this).text('一键NAS');
                                         return;
                                     }
-                                    $(this).text('已添加');
+                                    $(this).text('已提交');
                                 } catch (error) {
                                     console.error('[JAV老司机] 一键 NAS 添加失败:', error);
                                     $(this).text('添加失败');
